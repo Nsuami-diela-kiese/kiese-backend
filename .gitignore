@@ -1,0 +1,24 @@
+# Ne jamais suivre les dépendances locales
+node_modules/
+
+# Fichiers de configuration sensibles
+.env
+.env.local
+.env.*.local
+
+# Sorties de build éventuelles
+dist/
+build/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Système
+.DS_Store
+Thumbs.db
+
+# Railway cache ou artefacts
+.railway/
