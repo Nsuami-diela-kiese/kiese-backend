@@ -4,10 +4,10 @@ const db = require('../db');
 
 // Twilio
 const twilio = require('twilio');
-const accountSid = 'AC2ffd90753a77d1f5f75d09600c30d8a2';
-const authToken = '2ac1b27bf34bd122859d4ad20b2dea08';
+const accountSid = process.env.TWILIO_SID;
+const authToken = process.env.TWILIO_TOKEN;
 const client = twilio(accountSid, authToken);
-const fromNumber = '+15416304036';
+const fromNumber = process.env.TWILIO_PHONE;
 
 // 🔄 Met à jour la position d’un chauffeur
 router.post('/update_position', async (req, res) => {
