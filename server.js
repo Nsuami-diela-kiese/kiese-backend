@@ -12,6 +12,10 @@ app.use('/api/driver', driverRoutes);
 
 // 🔧 Utiliser le port fourni par Cloud Run
 const PORT = process.env.PORT || 3000;
+console.log("✅ TWILIO_SID:", process.env.TWILIO_SID);
+console.log("✅ TWILIO_TOKEN:", process.env.TWILIO_TOKEN);
+console.log("✅ TWILIO_PHONE:", process.env.TWILIO_PHONE);
+
 app.listen(PORT, () => {
   console.log(`✅ Serveur démarré sur le port ${PORT}`);
 });
