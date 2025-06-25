@@ -5,7 +5,7 @@ const db = require('../db');
 // Twilio
 const twilio = require('twilio');
 const accountSid = 'AC2ffd90753a77d1f5f75d09600c30d8a2';
-const authToken = 'fa7ede4ae21d1685bb5041f1a6d8ec47';
+const authToken = '2ac1b27bf34bd122859d4ad20b2dea08';
 const client = twilio(accountSid, authToken);
 const fromNumber = '+15416304036';
 
