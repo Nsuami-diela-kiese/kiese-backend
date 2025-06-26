@@ -6,9 +6,9 @@ const db = require('../db');
 const twilio = require('twilio');
 const accountSid = process.env.TWILIO_SID;
 const authToken = process.env.TWILIO_TOKEN;
-const fromNumber = process.env.TWILIO_PHONE;
-const client = require('twilio')(accountSid, authToken);
 
+const client = require('twilio')(accountSid, authToken);
+const fromNumber = process.env.TWILIO_PHONE;
 // 🔄 Met à jour la position d’un chauffeur
 router.post('/update_position', async (req, res) => {
   const { phone, lat, lng } = req.body;
