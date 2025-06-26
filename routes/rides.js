@@ -326,7 +326,7 @@ router.post('/create_auto', async (req, res) => {
   try {
     // S�lection du chauffeur disponible le plus proche
     const chauffeurRes = await db.query(
-      "SELECT phone, lat, lng FROM drivers WHERE available = true AND last_seen > NOW() - INTERVAL '1 minute' AND solde >= 3000 ORDER BY SQRT(POWER(lat - $1, 2) + POWER(lng - $2, 2)) ASC LIMIT 1",
+      "SELECT phone, lat, lng FROM drivers WHERE available = true AND last_seen > NOW() - INTERVAL '10 minutes' AND solde >= 3000 ORDER BY SQRT(POWER(lat - $1, 2) + POWER(lng - $2, 2)) ASC LIMIT 1",
       [origin_lat, origin_lng]
     );
 
@@ -449,7 +449,7 @@ router.post('/create_negociation', async (req, res) => {
 
   try {
     const chauffeurRes = await db.query(
-      "SELECT phone, name, lat, lng, plaque, couleur, photo FROM drivers WHERE available = true AND last_seen > NOW() - INTERVAL '1 minute' AND solde >= 3000 ORDER BY SQRT(POWER(lat - $1, 2) + POWER(lng - $2, 2)) ASC LIMIT 1",
+      "SELECT phone, name, lat, lng, plaque, couleur, photo FROM drivers WHERE available = true AND last_seen > NOW() - INTERVAL '10 minutes' AND solde >= 3000 ORDER BY SQRT(POWER(lat - $1, 2) + POWER(lng - $2, 2)) ASC LIMIT 1",
       [origin_lat, origin_lng]
     );
 
