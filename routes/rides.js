@@ -537,6 +537,44 @@ router.get('/:id/driver_position', async (req, res) => {
   }
 });
 
+router.get('/:id/resume_details', async (req, res) => {
+  const rideId = req.params.id;
+
+  try {
+    const result = await db.query(`
+      SELECT r.id, r.driver_phone, r.origin_lat, r.origin_lng, r.destination_lat, r.destination_lng, 
+             r.proposed_price, d.name, d.plaque, d.couleur, d.photo,
+             r.status
+      FROM rides r
+      JOIN drivers d ON r.driver_phone = d.phone
+      WHERE r.id = $1
+    `, [rideId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Course introuvable" });
+    }
+
+    const row = result.rows[0];
+
+    res.json({
+      chauffeur: {
+        phone: row.driver_phone,
+        name: row.name,
+        plaque: row.plaque,
+        couleur: row.couleur,
+        photo: row.photo,
+      },
+      eta_to_client: "Inconnu",
+      eta_to_destination: "Inconnu",
+      proposed_price: row.proposed_price,
+      status: row.status
+    });
+  } catch (err) {
+    console.error("❌ Erreur resume_details :", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
 
 
 module.exports = router;
