@@ -225,7 +225,9 @@ router.get('/:id/details', async (req, res) => {
       SELECT
         origin_lat, origin_lng,
         destination_lat, destination_lng,
-        driver_phone, status
+        driver_phone, proposed_price,
+        eta_to_client, eta_to_destination,
+        status
       FROM rides
       WHERE id = $1
     `, [rideId]);
@@ -236,17 +238,24 @@ router.get('/:id/details', async (req, res) => {
 
     const ride = result.rows[0];
 
-    // Récupérer la position actuelle du chauffeur
-    let driverLat = null, driverLng = null;
+    let driver = null;
 
     if (ride.driver_phone) {
       const driverRes = await db.query(`
-        SELECT lat, lng FROM drivers WHERE phone = $1
+        SELECT name, plaque, couleur, photo, phone
+        FROM drivers
+        WHERE phone = $1
       `, [ride.driver_phone]);
 
       if (driverRes.rows.length > 0) {
-        driverLat = driverRes.rows[0].lat;
-        driverLng = driverRes.rows[0].lng;
+        const d = driverRes.rows[0];
+        driver = {
+          phone: d.phone,
+          name: d.name,
+          plaque: d.plaque,
+          couleur: d.couleur,
+          photo: d.photo
+        };
       }
     }
 
@@ -255,15 +264,18 @@ router.get('/:id/details', async (req, res) => {
       origin_lng: ride.origin_lng,
       destination_lat: ride.destination_lat,
       destination_lng: ride.destination_lng,
-      driver_lat: driverLat,
-      driver_lng: driverLng,
       status: ride.status,
+      proposed_price: ride.proposed_price,
+      eta_to_client: ride.eta_to_client,
+      eta_to_destination: ride.eta_to_destination,
+      driver: driver // 🟢 Ceci est essentiel pour ResumeChauffeurAConfirmer
     });
   } catch (e) {
     console.error("❌ Erreur ride/:id/details", e);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
+
 
 
 // ?? R�cup�rer la discussion tarifaire
