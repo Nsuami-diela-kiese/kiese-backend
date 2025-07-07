@@ -226,7 +226,6 @@ router.get('/:id/details', async (req, res) => {
         origin_lat, origin_lng,
         destination_lat, destination_lng,
         driver_phone, proposed_price,
-        eta_to_client, eta_to_destination,
         status
       FROM rides
       WHERE id = $1
