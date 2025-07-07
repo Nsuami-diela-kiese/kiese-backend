@@ -236,12 +236,11 @@ router.get('/:id/details', async (req, res) => {
     }
 
     const ride = result.rows[0];
-
     let driver = null;
 
     if (ride.driver_phone) {
       const driverRes = await db.query(`
-        SELECT name, plaque, couleur, photo, phone
+        SELECT name, plaque, couleur, photo, phone, lat, lng
         FROM drivers
         WHERE phone = $1
       `, [ride.driver_phone]);
@@ -253,7 +252,9 @@ router.get('/:id/details', async (req, res) => {
           name: d.name,
           plaque: d.plaque,
           couleur: d.couleur,
-          photo: d.photo
+          photo: d.photo,
+          lat: d.lat,       // ✅ nom correct
+          lng: d.lng        // ✅ nom correct
         };
       }
     }
@@ -265,14 +266,13 @@ router.get('/:id/details', async (req, res) => {
       destination_lng: ride.destination_lng,
       status: ride.status,
       proposed_price: ride.proposed_price,
-      driver: driver // 🟢 Ceci est essentiel pour ResumeChauffeurAConfirmer
+      driver: driver
     });
   } catch (e) {
     console.error("❌ Erreur ride/:id/details", e);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
-
 
 
 // ?? R�cup�rer la discussion tarifaire
