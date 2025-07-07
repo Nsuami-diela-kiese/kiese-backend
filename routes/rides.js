@@ -265,8 +265,6 @@ router.get('/:id/details', async (req, res) => {
       destination_lng: ride.destination_lng,
       status: ride.status,
       proposed_price: ride.proposed_price,
-      eta_to_client: ride.eta_to_client,
-      eta_to_destination: ride.eta_to_destination,
       driver: driver // 🟢 Ceci est essentiel pour ResumeChauffeurAConfirmer
     });
   } catch (e) {
