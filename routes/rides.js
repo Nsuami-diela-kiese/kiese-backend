@@ -1,8 +1,8 @@
+require('dotenv').config();
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const axios = require('axios');
-
 
 
 // 🛺 Crée une course
@@ -351,7 +351,7 @@ router.post('/create_auto', async (req, res) => {
     /*const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
     const distUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?units=metric&origins=${chauffeur.lat},${chauffeur.lng}&destinations=${origin_lat},${origin_lng}|${destination_lat},${destination_lng}&key=${GOOGLE_API_KEY}`;
     */
-   const API_KEY = 'AIzaSyCvTmYQegyHQDU4UJ0PlkRu8RjBs8PeT48'; // remplace ici ta vraie clé directement
+   const API_KEY =  process.env.GOOGLE_MAPS_API_KEY; // remplace ici ta vraie clé directement
   const distUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?units=metric&origins=...&key=${API_KEY}`;
 
     const distResponse = await axios.get(distUrl);
