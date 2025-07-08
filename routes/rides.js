@@ -240,7 +240,7 @@ router.get('/:id/details', async (req, res) => {
 
     if (ride.driver_phone) {
       const driverRes = await db.query(`
-        SELECT name, plaque, couleur, photo, phone, lat, lng
+        SELECT name, plaque, couleur, photo, phone, lat, lng, marque, modele
         FROM drivers
         WHERE phone = $1
       `, [ride.driver_phone]);
@@ -254,7 +254,9 @@ router.get('/:id/details', async (req, res) => {
           couleur: d.couleur,
           photo: d.photo,
           lat: d.lat,       // ✅ nom correct
-          lng: d.lng        // ✅ nom correct
+          lng: d.lng,        // ✅ nom correct
+          marque: d.marque,
+          modele: d.modele
         };
       }
     }
@@ -458,7 +460,7 @@ router.post('/create_negociation', async (req, res) => {
 
   try {
     const chauffeurRes = await db.query(
-      "SELECT phone, name, lat, lng, plaque, couleur, photo FROM drivers WHERE available = true AND last_seen > NOW() - INTERVAL '10 minutes' AND solde >= 3000 ORDER BY SQRT(POWER(lat - $1, 2) + POWER(lng - $2, 2)) ASC LIMIT 1",
+      "SELECT phone, name, lat, lng, plaque, couleur, photo, marque, modele FROM drivers WHERE available = true AND last_seen > NOW() - INTERVAL '10 minutes' AND solde >= 3000 ORDER BY SQRT(POWER(lat - $1, 2) + POWER(lng - $2, 2)) ASC LIMIT 1",
       [origin_lat, origin_lng]
     );
 
@@ -511,7 +513,9 @@ router.post('/create_negociation', async (req, res) => {
         lng: chauffeur.lng,
         plaque: chauffeur.plaque,
         couleur: chauffeur.couleur,
-        photo: chauffeur.photo
+        photo: chauffeur.photo,
+        marque: chauffeur.marque,
+        modele: chauffeur.modele
       },
       eta_to_client: etaToClient,
       eta_to_destination: etaToDestination,
@@ -552,7 +556,7 @@ router.get('/:id/resume_details', async (req, res) => {
   try {
     const result = await db.query(`
       SELECT r.id, r.driver_phone, r.origin_lat, r.origin_lng, r.destination_lat, r.destination_lng, 
-             r.proposed_price, d.name, d.plaque, d.couleur, d.photo,
+             r.proposed_price, d.name, d.plaque, d.couleur, d.photo,marque, modele
              r.status
       FROM rides r
       JOIN drivers d ON r.driver_phone = d.phone
@@ -572,6 +576,8 @@ router.get('/:id/resume_details', async (req, res) => {
         plaque: row.plaque,
         couleur: row.couleur,
         photo: row.photo,
+        marque: row.marque,
+        modele: row.modele,
       },
       eta_to_client: "Inconnu",
       eta_to_destination: "Inconnu",
