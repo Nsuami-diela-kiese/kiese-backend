@@ -470,7 +470,9 @@ router.post('/create_negociation', async (req, res) => {
 
     const chauffeur = chauffeurRes.rows[0];
 
-    const distUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?units=metric&origins=${chauffeur.lat},${chauffeur.lng}&destinations=${origin_lat},${origin_lng}|${destination_lat},${destination_lng}&key=AIzaSyCvTmYQegyHQDU4UJ0PlkRu8RjBs8PeT48`;
+    const API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+
+    const distUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?units=metric` +  `&origins=${chauffeur.lat},${chauffeur.lng}` +  `&destinations=${origin_lat},${origin_lng}|${destination_lat},${destination_lng}` +  `&key=${API_KEY}`;
     const distResponse = await axios.get(distUrl);
     const elements = distResponse.data.rows?.[0]?.elements;
 
