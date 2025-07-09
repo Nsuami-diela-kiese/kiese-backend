@@ -429,7 +429,7 @@ if (!route) return res.status(400).json({ error: "Route manquante" });
           route = $1,
           commission = $2
       WHERE id = $3
-    `, [route, commission, rideId]);
+    `, [JSON.stringify(route), commission, rideId]);
 
     // Déduire du solde du chauffeur
     await db.query(`
