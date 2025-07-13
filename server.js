@@ -1,16 +1,25 @@
+
 const express = require('express');
 require('dotenv').config();
 const app = express();
 
-app.use(express.json()); // ✅ Pour pouvoir lire req.body
+// ✅ Middleware JSON
+app.use(express.json());
 
+// ✅ Middleware de debug pour toutes les requêtes
+app.use((req, res, next) => {
+  console.log("🧪 METHOD:", req.method, "| PATH:", req.path, "| BODY:", req.body);
+  next();
+});
+
+// 📦 Routes
 const rideRoutes = require('./routes/rides');
 app.use('/api/ride', rideRoutes);
 
 const driverRoutes = require('./routes/drivers');
 app.use('/api/driver', driverRoutes);
 
-// 🔧 Utiliser le port fourni par Cloud Run
+// ✅ PORT
 const PORT = process.env.PORT || 3000;
 console.log("✅ TWILIO_SID:", process.env.TWILIO_SID);
 console.log("✅ TWILIO_TOKEN:", process.env.TWILIO_TOKEN);
