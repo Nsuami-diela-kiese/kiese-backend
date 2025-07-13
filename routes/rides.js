@@ -46,21 +46,29 @@ router.get('/:id/status', async (req, res) => {
 
   try {
     const result = await db.query(
-      'SELECT status FROM rides WHERE id = $1',
-      //[rideId]
-      [req.params.id]
+      'SELECT status, cancelled_by FROM rides WHERE id = $1',
+      [rideId]
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Course introuvable' });
     }
 
-    res.json({ status: result.rows[0].status });
+    const { status, cancelled_by } = result.rows[0];
+
+    // On renvoie cancelled_by seulement s'il est non nul
+    const response = { status };
+    if (cancelled_by) {
+      response.cancelled_by = cancelled_by;
+    }
+
+    res.json(response);
   } catch (err) {
-    console.error(err);
+    console.error('Erreur lors de la récupération du statut de course :', err);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
+
 // ?? Enregistre le montant n�goci�
 router.post('/:id/price', async (req, res) => {
   const rideId = req.params.id;
@@ -278,50 +286,63 @@ router.get('/:id/details', async (req, res) => {
 
 
 // ?? R�cup�rer la discussion tarifaire
-router.get('/:id/discussion', async (req, res) => {
-  const rideId = req.params.id;
-
-  try {
-    const result = await db.query(
-      'SELECT discussion FROM rides WHERE id = $1',
-      [rideId]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Course non trouv�e' });
-    }
-
-    res.json({ discussion: result.rows[0].discussion });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erreur lecture discussion' });
-  }
-});
-// ? Ajouter une offre ou message dans la discussion
 router.post('/:id/discussion', async (req, res) => {
   const rideId = req.params.id;
-  const { from, amount } = req.body;
-  const message = `${from}:${amount}`;
+  const { from, amount, type } = req.body; 
+  // type: 'normal' (défaut), 'last_offer', 'accept', 'refuse'
 
   try {
-    // Ajoute le message dans la discussion
+    let message = `${from}:${amount}`;
+    if (type === 'last_offer') {
+      message += ':last_offer';
+
+      await db.query(
+        `UPDATE rides
+         SET last_offer_from = $1, last_offer_value = $2
+         WHERE id = $3`,
+        [from, amount, rideId]
+      );
+    } else if (type === 'accept') {
+      message += ':accepted';
+    } else if (type === 'refuse') {
+      // Vérifie s'il y avait une dernière offre
+      const rideRes = await db.query(
+        `SELECT last_offer_from FROM rides WHERE id = $1`,
+        [rideId]
+      );
+      const lastOfferFrom = rideRes.rows[0]?.last_offer_from;
+
+      if (lastOfferFrom && lastOfferFrom !== from) {
+        // Si c’est l'autre partie qui avait fait la dernière offre et elle est refusée
+        await db.query(
+          `UPDATE rides SET status = 'annulee', cancelled_by = $1 WHERE id = $2`,
+          [from, rideId]
+        );
+      }
+
+      message += ':refused';
+    }
+
     await db.query(
       'UPDATE rides SET discussion = array_append(discussion, $1) WHERE id = $2',
       [message, rideId]
     );
 
-    // Met � jour proposed_price peu importe l'origine
-    await db.query(
-      'UPDATE rides SET proposed_price = $1, negotiation_status = \'en_attente\' WHERE id = $2',
-      [amount, rideId]
-    );
+    // Toujours mettre à jour le montant proposé
+    if (type !== 'accept' && amount) {
+      await db.query(
+        `UPDATE rides SET proposed_price = $1 WHERE id = $2`,
+        [amount, rideId]
+      );
+    }
 
     res.json({ success: true });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'Erreur discussion/prix' });
+    console.error("❌ Erreur discussion:", e);
+    res.status(500).json({ error: "Erreur serveur" });
   }
 });
+
 
 // Cr�e une course automatiquement avec ETA chauffeur ? client et client ? destination
 router.post('/create_auto', async (req, res) => {
