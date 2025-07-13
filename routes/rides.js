@@ -614,7 +614,7 @@ router.get('/:id/resume_details', async (req, res) => {
 });
 
 
-router.post('/ride/:id/negociation', async (req, res) => {
+router.post('/:id/negociation', async (req, res) => {
   const rideId = req.params.id;
   const { from, type, message } = req.body;
 
@@ -656,7 +656,7 @@ router.post('/ride/:id/negociation', async (req, res) => {
   }
 });
 
-router.get('/ride/:id/negociations', async (req, res) => {
+router.get('/:id/negociations', async (req, res) => {
   const rideId = req.params.id;
 
   try {
