@@ -287,6 +287,7 @@ router.get('/:id/details', async (req, res) => {
 
 // ?? R�cup�rer la discussion tarifaire
 router.post('/:id/discussion', async (req, res) => {
+  console.log("🟢 Requête reçue :", req.body);
   const rideId = req.params.id;
   const { from, amount, type } = req.body; 
   // type: 'normal' (défaut), 'last_offer', 'accept', 'refuse'
