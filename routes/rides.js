@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+app.use(express.json()); //
 const router = express.Router();
 const db = require('../db');
 const axios = require('axios');
