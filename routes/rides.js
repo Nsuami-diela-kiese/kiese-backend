@@ -614,5 +614,48 @@ router.get('/:id/resume_details', async (req, res) => {
 });
 
 
+router.post('/ride/:id/negociation', async (req, res) => {
+  const rideId = req.params.id;
+  const { from, type, message } = req.body;
+
+  try {
+    let formatted = from;
+
+    if (type === 'proposition') {
+      formatted += `:${message}`;
+    } else if (type === 'dernier') {
+      formatted += `:dernier:${message}`;
+    } else {
+      formatted += `:${type}`; // accepte ou refuse
+    }
+
+    const rideRes = await db.query('SELECT discussion FROM rides WHERE id = $1', [rideId]);
+    const discussion = rideRes.rows[0]?.discussion || [];
+
+    const lastLine = discussion[discussion.length - 1] || '';
+    const lastWasDernier = lastLine.includes(':dernier');
+    const lastWasFromOther = !lastLine.startsWith(from);
+
+    let updates = [`discussion = array_append(discussion, $1)`];
+    let values = [formatted, rideId];
+
+    if (type === 'refuse' && lastWasDernier && lastWasFromOther) {
+      updates.push("status = 'annulee'", "cancelled_by = $2");
+      values.push(from);
+    }
+
+    await db.query(
+      `UPDATE rides SET ${updates.join(', ')} WHERE id = $${values.length}`,
+      values
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("❌ Erreur négociation :", err);
+    res.status(500).json({ error: 'Erreur serveur négociation' });
+  }
+});
+
+
 
 module.exports = router;
