@@ -287,10 +287,16 @@ router.get('/:id/details', async (req, res) => {
 
 // ?? R�cup�rer la discussion tarifaire
 router.post('/:id/discussion', async (req, res) => {
-  console.log("🟢 Requête reçue :", req.body);
   const rideId = req.params.id;
-  const { from, amount, type } = req.body; 
-  // type: 'normal' (défaut), 'last_offer', 'accept', 'refuse'
+  const body = req.body;
+
+  console.log("🟢 BODY REÇU :", body);
+
+  if (!body || !body.from || !body.type) {
+    return res.status(400).json({ error: "Corps invalide ou manquant", received: body });
+  }
+
+  const { from, amount, type } = body;
 
   try {
     let message = `${from}:${amount}`;
@@ -306,7 +312,6 @@ router.post('/:id/discussion', async (req, res) => {
     } else if (type === 'accept') {
       message += ':accepted';
     } else if (type === 'refuse') {
-      // Vérifie s'il y avait une dernière offre
       const rideRes = await db.query(
         `SELECT last_offer_from FROM rides WHERE id = $1`,
         [rideId]
@@ -314,7 +319,6 @@ router.post('/:id/discussion', async (req, res) => {
       const lastOfferFrom = rideRes.rows[0]?.last_offer_from;
 
       if (lastOfferFrom && lastOfferFrom !== from) {
-        // Si c’est l'autre partie qui avait fait la dernière offre et elle est refusée
         await db.query(
           `UPDATE rides SET status = 'annulee', cancelled_by = $1 WHERE id = $2`,
           [from, rideId]
@@ -329,7 +333,6 @@ router.post('/:id/discussion', async (req, res) => {
       [message, rideId]
     );
 
-    // Toujours mettre à jour le montant proposé
     if (type !== 'accept' && amount) {
       await db.query(
         `UPDATE rides SET proposed_price = $1 WHERE id = $2`,
@@ -343,7 +346,6 @@ router.post('/:id/discussion', async (req, res) => {
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
-
 
 router.get('/:id/discussion', async (req, res) => {
   const rideId = req.params.id;
