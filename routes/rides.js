@@ -135,18 +135,21 @@ router.post('/:id/confirm_price', async (req, res) => {
   try {
     const result = await db.query(`
       UPDATE rides
-      SET confirmed_price = proposed_price,
-          negotiation_status = 'confirmee', status='course_acceptee'
+      SET
+        confirmed_price = proposed_price,
+        negotiation_status = 'confirmee',
+        status = 'course_acceptee'
       WHERE id = $1
       RETURNING *;
     `, [rideId]);
 
     res.json({ success: true, ride: result.rows[0] });
   } catch (err) {
-    console.error(err);
+    console.error("❌ Erreur confirm_price :", err);
     res.status(500).json({ error: 'Erreur confirmation prix' });
   }
 });
+
 // ?? R�cup�re toutes les courses en attente de confirmation de prix
 router.get('/en_attente/:driverPhone', async (req, res) => {
   const driverPhone = req.params.driverPhone;
