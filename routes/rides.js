@@ -241,7 +241,8 @@ router.get('/:id/details', async (req, res) => {
         confirmed_price,
         negotiation_status,
         cancelled_by,
-        status
+        status,
+        client_accepted  -- ✅ ajouter ceci
       FROM rides
       WHERE id = $1
     `, [rideId]);
@@ -286,6 +287,7 @@ router.get('/:id/details', async (req, res) => {
       proposed_price: ride.proposed_price,
       confirmed_price: ride.confirmed_price,
       cancelled_by: ride.cancelled_by,
+      client_accepted: ride.client_accepted,  // ✅ ici aussi
       driver: driver
     });
   } catch (e) {
@@ -293,6 +295,7 @@ router.get('/:id/details', async (req, res) => {
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
+
 
 
 
