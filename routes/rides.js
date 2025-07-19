@@ -308,51 +308,32 @@ router.post('/:id/discussion', async (req, res) => {
 
   try {
     let message = `${from}:${amount}`;
-
+    
     if (type === 'last_offer') {
       message += ':last_offer';
 
       await db.query(
-        `UPDATE rides
-         SET last_offer_from = $1,
-             last_offer_value = $2
-         WHERE id = $3`,
+        `UPDATE rides SET last_offer_from = $1, last_offer_value = $2 WHERE id = $3`,
         [from, amount, rideId]
       );
+    }
 
-    } else if (type === 'accept') {
-      // 🧠 On récupère le montant proposé par le client
-      const rideRes = await db.query(
-        `SELECT proposed_price FROM rides WHERE id = $1`,
-        [rideId]
-      );
-      const proposedPrice = rideRes.rows[0]?.proposed_price ?? 0;
+    else if (type === 'accept') {
+      message += ':accepted';
 
-      // 🔄 Crée le message correctement avec le vrai montant
-      message = `${from}:${proposedPrice}:accepted`;
+      if (from === 'client') {
+        // ✅ Le client a accepté → on ne change pas le statut, juste un flag
+        await db.query(`UPDATE rides SET client_accepted = true WHERE id = $1`, [rideId]);
+      }
+    }
 
-      await db.query(
-        `UPDATE rides
-         SET status = 'course_acceptee',
-             negotiation_status = 'confirmee',
-             confirmed_price = $1
-         WHERE id = $2`,
-        [proposedPrice, rideId]
-      );
-
-    } else if (type === 'refuse') {
-      const rideRes = await db.query(
-        `SELECT last_offer_from FROM rides WHERE id = $1`,
-        [rideId]
-      );
+    else if (type === 'refuse') {
+      const rideRes = await db.query(`SELECT last_offer_from FROM rides WHERE id = $1`, [rideId]);
       const lastOfferFrom = rideRes.rows[0]?.last_offer_from;
 
       if (lastOfferFrom && lastOfferFrom !== from) {
         await db.query(
-          `UPDATE rides
-           SET status = 'annulee',
-               cancelled_by = $1
-           WHERE id = $2`,
+          `UPDATE rides SET status = 'annulee', cancelled_by = $1 WHERE id = $2`,
           [from, rideId]
         );
       }
@@ -360,14 +341,14 @@ router.post('/:id/discussion', async (req, res) => {
       message += ':refused';
     }
 
-    // Ajout du message à la discussion
+    // enregistrer le message dans le tableau de discussion
     await db.query(
-      'UPDATE rides SET discussion = array_append(discussion, $1) WHERE id = $2',
+      `UPDATE rides SET discussion = array_append(discussion, $1) WHERE id = $2`,
       [message, rideId]
     );
 
-    // Mise à jour du montant proposé si pas un accept
-    if (type !== 'accept' && amount) {
+    // mettre à jour le montant proposé, sauf si accept/refuse
+    if (type !== 'accept' && type !== 'refuse' && amount) {
       await db.query(
         `UPDATE rides SET proposed_price = $1 WHERE id = $2`,
         [amount, rideId]
