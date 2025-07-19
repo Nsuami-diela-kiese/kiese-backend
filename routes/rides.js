@@ -233,7 +233,11 @@ router.get('/:id/details', async (req, res) => {
       SELECT
         origin_lat, origin_lng,
         destination_lat, destination_lng,
-        driver_phone, proposed_price,
+        driver_phone,
+        proposed_price,
+        confirmed_price,
+        negotiation_status,
+        cancelled_by,
         status
       FROM rides
       WHERE id = $1
@@ -261,8 +265,8 @@ router.get('/:id/details', async (req, res) => {
           plaque: d.plaque,
           couleur: d.couleur,
           photo: d.photo,
-          lat: d.lat,       // ✅ nom correct
-          lng: d.lng,        // ✅ nom correct
+          lat: d.lat,
+          lng: d.lng,
           marque: d.marque,
           modele: d.modele
         };
@@ -275,7 +279,10 @@ router.get('/:id/details', async (req, res) => {
       destination_lat: ride.destination_lat,
       destination_lng: ride.destination_lng,
       status: ride.status,
+      negotiation_status: ride.negotiation_status,
       proposed_price: ride.proposed_price,
+      confirmed_price: ride.confirmed_price,
+      cancelled_by: ride.cancelled_by,
       driver: driver
     });
   } catch (e) {
@@ -283,6 +290,7 @@ router.get('/:id/details', async (req, res) => {
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
+
 
 
 // ?? R�cup�rer la discussion tarifaire
