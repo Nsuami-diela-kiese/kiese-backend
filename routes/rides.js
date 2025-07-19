@@ -308,7 +308,7 @@ router.post('/:id/discussion', async (req, res) => {
 
   try {
     let message = `${from}:${amount}`;
-    
+
     if (type === 'last_offer') {
       message += ':last_offer';
 
@@ -319,15 +319,17 @@ router.post('/:id/discussion', async (req, res) => {
          WHERE id = $3`,
         [from, amount, rideId]
       );
-    } else if (type === 'accept') {
-      message += ':accepted';
 
-      // 🧠 On récupère le dernier montant proposé
+    } else if (type === 'accept') {
+      // 🧠 On récupère le montant proposé par le client
       const rideRes = await db.query(
         `SELECT proposed_price FROM rides WHERE id = $1`,
         [rideId]
       );
-      const proposedPrice = rideRes.rows[0]?.proposed_price;
+      const proposedPrice = rideRes.rows[0]?.proposed_price ?? 0;
+
+      // 🔄 Crée le message correctement avec le vrai montant
+      message = `${from}:${proposedPrice}:accepted`;
 
       await db.query(
         `UPDATE rides
@@ -337,6 +339,7 @@ router.post('/:id/discussion', async (req, res) => {
          WHERE id = $2`,
         [proposedPrice, rideId]
       );
+
     } else if (type === 'refuse') {
       const rideRes = await db.query(
         `SELECT last_offer_from FROM rides WHERE id = $1`,
@@ -357,13 +360,13 @@ router.post('/:id/discussion', async (req, res) => {
       message += ':refused';
     }
 
-    // Enregistrement du message dans la discussion
+    // Ajout du message à la discussion
     await db.query(
       'UPDATE rides SET discussion = array_append(discussion, $1) WHERE id = $2',
       [message, rideId]
     );
 
-    // Mise à jour du montant proposé si fourni et pas une acceptation
+    // Mise à jour du montant proposé si pas un accept
     if (type !== 'accept' && amount) {
       await db.query(
         `UPDATE rides SET proposed_price = $1 WHERE id = $2`,
@@ -377,6 +380,7 @@ router.post('/:id/discussion', async (req, res) => {
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
+
 
 
 router.get('/:id/discussion', async (req, res) => {
