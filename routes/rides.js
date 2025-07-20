@@ -329,18 +329,28 @@ router.post('/:id/discussion', async (req, res) => {
         await db.query(`UPDATE rides SET client_accepted = true WHERE id = $1`, [rideId]);
       }
     } else if (type === 'refuse') {
-      message += ':refused';
+  const result = await db.query(`
+    SELECT last_offer_from, discussion FROM rides WHERE id = $1
+  `, [rideId]);
 
-      const result = await db.query(`SELECT last_offer_from FROM rides WHERE id = $1`, [rideId]);
-      const lastOfferFrom = result.rows[0]?.last_offer_from;
+  const lastOfferFrom = result.rows[0]?.last_offer_from;
+  const discussion = result.rows[0]?.discussion || [];
+  const lastMsg = discussion.length > 0 ? discussion[discussion.length - 1] : "";
 
-      if (lastOfferFrom && lastOfferFrom !== from) {
-        await db.query(
-          `UPDATE rides SET status = 'annulee', cancelled_by = $1 WHERE id = $2`,
-          [from, rideId]
-        );
-      }
-    }
+  const lastWasClientLastOffer = (
+    lastMsg.startsWith('client') && lastMsg.includes(':last_offer')
+  );
+
+  if (lastOfferFrom && lastOfferFrom !== from && lastWasClientLastOffer) {
+    await db.query(
+      `UPDATE rides SET status = 'annulee', cancelled_by = $1 WHERE id = $2`,
+      [from, rideId]
+    );
+  }
+
+  message += ':refused';
+}
+
 
     // ✅ Enregistrer message dans le tableau
     await db.query(
