@@ -405,7 +405,6 @@ router.post('/create_auto', async (req, res) => {
   } = req.body;
 
   try {
-    // S�lection du chauffeur disponible le plus proche
     const chauffeurRes = await db.query(
       "SELECT phone, lat, lng FROM drivers WHERE available = true AND last_seen > NOW() - INTERVAL '10 minutes' AND solde >= 3000 ORDER BY SQRT(POWER(lat - $1, 2) + POWER(lng - $2, 2)) ASC LIMIT 1",
       [origin_lat, origin_lng]
@@ -416,54 +415,54 @@ router.post('/create_auto', async (req, res) => {
     }
 
     const chauffeur = chauffeurRes.rows[0];
+    const montantPropose = 3000;
+    const messageInitial = `client:${montantPropose}`;
 
-    // Appel � l'API Google Distance Matrix
-    /*const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
-    const distUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?units=metric&origins=${chauffeur.lat},${chauffeur.lng}&destinations=${origin_lat},${origin_lng}|${destination_lat},${destination_lng}&key=${GOOGLE_API_KEY}`;
-    */
-   const API_KEY =  process.env.GOOGLE_MAPS_API_KEY; // remplace ici ta vraie clé directement
-  const distUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?units=metric&origins=...&key=${API_KEY}`;
+    const API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+    const distUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?units=metric&origins=${chauffeur.lat},${chauffeur.lng}&destinations=${origin_lat},${origin_lng}|${destination_lat},${destination_lng}&key=${API_KEY}`;
 
     const distResponse = await axios.get(distUrl);
-    console.log("📦 Google Distance response:", distResponse.data);
-    if (!distResponse.data.rows || !distResponse.data.rows[0] || !distResponse.data.rows[0].elements) {
-  return res.status(500).json({ error: 'Réponse Distance Matrix invalide', raw: distResponse.data });
-}
-    const elements = distResponse.data.rows[0].elements;
+    const elements = distResponse.data.rows?.[0]?.elements;
+
+    if (!elements || elements.length < 2) {
+      return res.status(500).json({ error: 'Réponse Distance Matrix invalide', data: distResponse.data });
+    }
 
     const etaToClient = elements[0].duration.text;
     const etaToDestination = elements[1].duration.text;
 
-    // Cr�ation de la course
     const insertRes = await db.query(`
       INSERT INTO rides (
         client_name, client_phone,
         origin_lat, origin_lng,
         destination_lat, destination_lng,
-        driver_phone, status, negotiation_status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'en_attente', 'en_attente')
+        driver_phone, proposed_price,
+        discussion, client_accepted,
+        status, negotiation_status
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ARRAY[$9], true, 'en_attente', 'en_attente')
       RETURNING id
     `, [
       client_name, client_phone,
       origin_lat, origin_lng,
       destination_lat, destination_lng,
-      chauffeur.phone
+      chauffeur.phone,
+      montantPropose,
+      messageInitial
     ]);
 
     res.status(201).json({
       ride_id: insertRes.rows[0].id,
-      driver_phone: chauffeur.driver_phone,
+      driver_phone: chauffeur.phone,
       driver_lat: chauffeur.lat,
       driver_lng: chauffeur.lng,
       eta_to_client: etaToClient,
       eta_to_destination: etaToDestination
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erreur serveur cr�ation course' });
+    console.error("❌ Erreur create_auto :", err);
+    res.status(500).json({ error: 'Erreur serveur création course', details: err.message });
   }
 });
-
 
 
 router.post('/:id/cancel', async (req, res) => {
@@ -539,18 +538,15 @@ router.post('/create_negociation', async (req, res) => {
     }
 
     const chauffeur = chauffeurRes.rows[0];
+    const messageInitial = `client:${proposed_price}`;
 
     const API_KEY = process.env.GOOGLE_MAPS_API_KEY;
-
-    const distUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?units=metric` +  `&origins=${chauffeur.lat},${chauffeur.lng}` +  `&destinations=${origin_lat},${origin_lng}|${destination_lat},${destination_lng}` +  `&key=${API_KEY}`;
+    const distUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?units=metric&origins=${chauffeur.lat},${chauffeur.lng}&destinations=${origin_lat},${origin_lng}|${destination_lat},${destination_lng}&key=${API_KEY}`;
     const distResponse = await axios.get(distUrl);
     const elements = distResponse.data.rows?.[0]?.elements;
 
     if (!elements || elements.length < 2) {
-      return res.status(500).json({
-        error: 'Réponse Distance Matrix invalide',
-        data: distResponse.data
-      });
+      return res.status(500).json({ error: 'Réponse Distance Matrix invalide', data: distResponse.data });
     }
 
     const etaToClient = elements[0]?.duration?.text || 'inconnu';
@@ -561,19 +557,18 @@ router.post('/create_negociation', async (req, res) => {
         client_name, client_phone,
         origin_lat, origin_lng,
         destination_lat, destination_lng,
-        driver_phone, proposed_price, status, negotiation_status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'en_attente', 'en_attente')
+        driver_phone, proposed_price,
+        discussion, client_accepted,
+        status, negotiation_status
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ARRAY[$9], true, 'en_attente', 'en_attente')
       RETURNING id`,
       [
         client_name, client_phone,
         origin_lat, origin_lng,
         destination_lat, destination_lng,
-        chauffeur.phone, proposed_price
+        chauffeur.phone, proposed_price,
+        messageInitial
       ]
-    );
-    await db.query(
-    "UPDATE rides SET discussion = array_append(discussion, $1) WHERE id = $2",
-    [`client:${proposed_price}`, insertRes.rows[0].id]
     );
 
     res.status(201).json({
