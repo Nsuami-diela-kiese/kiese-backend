@@ -314,28 +314,25 @@ router.post('/:id/discussion', async (req, res) => {
 
   try {
     let message = `${from}:${amount}`;
-    
+
     if (type === 'last_offer') {
       message += ':last_offer';
-
       await db.query(
         `UPDATE rides SET last_offer_from = $1, last_offer_value = $2 WHERE id = $3`,
         [from, amount, rideId]
       );
-    }
-
-    else if (type === 'accept') {
+    } else if (type === 'accept') {
       message += ':accepted';
 
+      // ✅ Le client accepte → flag accepté
       if (from === 'client') {
-        // ✅ Le client a accepté → on ne change pas le statut, juste un flag
         await db.query(`UPDATE rides SET client_accepted = true WHERE id = $1`, [rideId]);
       }
-    }
+    } else if (type === 'refuse') {
+      message += ':refused';
 
-    else if (type === 'refuse') {
-      const rideRes = await db.query(`SELECT last_offer_from FROM rides WHERE id = $1`, [rideId]);
-      const lastOfferFrom = rideRes.rows[0]?.last_offer_from;
+      const result = await db.query(`SELECT last_offer_from FROM rides WHERE id = $1`, [rideId]);
+      const lastOfferFrom = result.rows[0]?.last_offer_from;
 
       if (lastOfferFrom && lastOfferFrom !== from) {
         await db.query(
@@ -343,22 +340,28 @@ router.post('/:id/discussion', async (req, res) => {
           [from, rideId]
         );
       }
-
-      message += ':refused';
     }
 
-    // enregistrer le message dans le tableau de discussion
+    // ✅ Enregistrer message dans le tableau
     await db.query(
       `UPDATE rides SET discussion = array_append(discussion, $1) WHERE id = $2`,
       [message, rideId]
     );
 
-    // mettre à jour le montant proposé, sauf si accept/refuse
+    // ✅ Mettre à jour le prix proposé (sauf accept/refuse)
     if (type !== 'accept' && type !== 'refuse' && amount) {
       await db.query(
         `UPDATE rides SET proposed_price = $1 WHERE id = $2`,
         [amount, rideId]
       );
+    }
+
+    // ✅ Gérer la logique client_accepted en fonction de qui parle
+    if (from === 'client' && (type === 'normal' || type === 'last_offer' || type === 'accept')) {
+      await db.query(`UPDATE rides SET client_accepted = true WHERE id = $1`, [rideId]);
+    }
+    if (from === 'chauffeur' && (type === 'normal' || type === 'last_offer')) {
+      await db.query(`UPDATE rides SET client_accepted = false WHERE id = $1`, [rideId]);
     }
 
     res.json({ success: true });
@@ -367,7 +370,6 @@ router.post('/:id/discussion', async (req, res) => {
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
-
 
 
 router.get('/:id/discussion', async (req, res) => {
