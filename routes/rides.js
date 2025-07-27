@@ -337,11 +337,13 @@ router.post('/:id/discussion', async (req, res) => {
   const discussion = result.rows[0]?.discussion || [];
   const lastMsg = discussion.length > 0 ? discussion[discussion.length - 1] : "";
 
-  const lastWasClientLastOffer = (
-    lastMsg.startsWith('client') && lastMsg.includes(':last_offer')
-  );
+  const lastWasLastOffer = lastMsg.includes(':last_offer');
 
-  if (lastOfferFrom && lastOfferFrom !== from && lastWasClientLastOffer) {
+  if (
+    lastOfferFrom &&
+    lastWasLastOffer &&
+    lastOfferFrom !== from // on refuse une offre de l'autre
+  ) {
     await db.query(
       `UPDATE rides SET status = 'annulee', cancelled_by = $1 WHERE id = $2`,
       [from, rideId]
