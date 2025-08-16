@@ -58,7 +58,6 @@ router.post('/:phone/request_otp', async (req, res) => {
   try {
     // === Bypass reviewer : pas d’envoi SMS, on pose directement le code de démo en DB ===
     if (allowReviewer && phone === reviewerPhone) {
-      await upsertDemoDriver(phone);
       await db.query(
         "UPDATE drivers SET otp_code = $1, otp_expires = NOW() + INTERVAL '60 minutes' WHERE phone = $2",
         [reviewerOtp, phone]
@@ -232,4 +231,5 @@ router.post('/:phone/ping_position', async (req, res) => {
   }
 });
 module.exports = router;
+
 
