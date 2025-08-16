@@ -1,7 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-
+const allowReviewer = process.env.ALLOW_REVIEWER_OTP === 'true';
+const reviewerPhone = process.env.REVIEWER_PHONE_DRIVER;
+const reviewerOtp   = process.env.REVIEWER_OTP_DRIVER;
 // Twilio
 const twilio = require('twilio');
 const accountSid = process.env.TWILIO_SID;
@@ -54,13 +56,27 @@ router.post('/:phone/request_otp', async (req, res) => {
   const phone = req.params.phone;
 
   try {
+    // === Bypass reviewer : pas d’envoi SMS, on pose directement le code de démo en DB ===
+    if (allowReviewer && phone === reviewerPhone) {
+      await upsertDemoDriver(phone);
+      await db.query(
+        "UPDATE drivers SET otp_code = $1, otp_expires = NOW() + INTERVAL '60 minutes' WHERE phone = $2",
+        [reviewerOtp, phone]
+      );
+      return res.json({ success: true, reviewer: true });
+    }
+
+    // === Flux normal ===
     const result = await db.query('SELECT phone FROM drivers WHERE phone = $1', [phone]);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Chauffeur introuvable" });
     }
 
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    await db.query("UPDATE drivers SET otp_code = $1, otp_expires = NOW() + INTERVAL '5 minutes' WHERE phone = $2", [code, phone]);
+    await db.query(
+      "UPDATE drivers SET otp_code = $1, otp_expires = NOW() + INTERVAL '5 minutes' WHERE phone = $2",
+      [code, phone]
+    );
 
     await client.messages.create({
       body: `Kiese - Votre code est : ${code}`,
@@ -70,26 +86,31 @@ router.post('/:phone/request_otp', async (req, res) => {
 
     res.json({ success: true });
   } catch (err) {
-  console.error("Erreur OTP Twilio:", {
-    message: err.message,
-    code: err.code,
-    moreInfo: err.moreInfo,
-  });
-  res.status(500).json({ error: "Erreur d'envoi OTP", details: err.message });
-}
-
+    console.error("Erreur OTP Twilio:", {
+      message: err.message,
+      code: err.code,
+      moreInfo: err.moreInfo,
+    });
+    res.status(500).json({ error: "Erreur d'envoi OTP", details: err.message });
+  }
 });
+
 
 router.post('/:phone/verify_otp', async (req, res) => {
   const { otp_code } = req.body;
   const phone = req.params.phone;
 
   try {
+    // === Bypass reviewer : accepte directement si code/numéro correspondent ===
+    if (allowReviewer && phone === reviewerPhone && otp_code === reviewerOtp) {
+      return res.json({ success: true, reviewer: true });
+    }
+
+    // === Flux normal ===
     const result = await db.query(
       "SELECT otp_code, otp_expires FROM drivers WHERE phone = $1",
       [phone]
     );
-
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Chauffeur introuvable" });
     }
@@ -102,7 +123,6 @@ router.post('/:phone/verify_otp', async (req, res) => {
 
     const now = new Date();
     const expiry = new Date(row.otp_expires);
-
     if (now > expiry) {
       return res.status(403).json({ error: "Code expiré" });
     }
@@ -113,6 +133,7 @@ router.post('/:phone/verify_otp', async (req, res) => {
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
+
 
 router.get('/:rideId/driver_position', async (req, res) => {
   const result = await db.query(`
@@ -211,3 +232,4 @@ router.post('/:phone/ping_position', async (req, res) => {
   }
 });
 module.exports = router;
+
