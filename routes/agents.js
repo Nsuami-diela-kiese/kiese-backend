@@ -68,5 +68,17 @@ router.post('/:phone/verify_otp', async (req, res) => {
     if (!otp_code || otp_code !== ag.otp_code) return res.status(401).json({ error: 'OTP incorrect' });
     if (!ag.otp_expires || new Date(ag.otp_expires) < new Date()) return res.status(403).json({ error: 'OTP expiré' });
 
-    // efface l’OTP comme pour chauffeur
-    await db.query("UPDATE agents SET otp_code=NULL, otp_expires=NULL WHERE id=$1", [ag.id])
+    // ✅ effacer l’OTP (comme pour chauffeur)
+    await db.query(
+      "UPDATE agents SET otp_code=NULL, otp_expires=NULL WHERE id=$1",
+      [ag.id]
+    );
+
+    res.json({ success: true, agent: { id: ag.id, name: ag.name, phone: ag.phone } });
+  } catch (e) {
+    console.error('agents/verify_otp', e);
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
+module.exports = router;
