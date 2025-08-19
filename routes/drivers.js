@@ -268,7 +268,11 @@ router.post('/admin/driver', async (req, res) => {
     res.status(201).json({ success: true });
   } catch (e) {
     console.error('admin upsert driver', e);
-    res.status(500).json({ error: 'server error' });
+    return res.status(500).json({
+    error: 'server error',
+    details: e.message,            // 👈 TEMP : à retirer plus tard
+  });
+    
   }
 });
 
@@ -344,6 +348,7 @@ router.post('/admin/driver/:phone/update_solde', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
