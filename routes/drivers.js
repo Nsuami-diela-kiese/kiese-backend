@@ -253,35 +253,39 @@ router.post('/admin/driver', async (req, res) => {
     if (ar.rows.length === 0) return res.status(401).json({ error: 'Unknown agent phone' });
     const agentId = ar.rows[0].id;
 
-    const DEFAULT_SOLDE = 50000; // à la création uniquement
+    const DEFAULT_SOLDE = 50000; // appliqué UNIQUEMENT à la création
     const DEFAULT_PHOTO = 'https://via.placeholder.com/100';
 
     // Mapping:
     // vehicle_make -> marque
     // vehicle_type -> modele
     // plate        -> plaque
-    // color        -> couleur  ✅
+    // color        -> couleur
+    //
+    // -> created_by_agent_id défini à la création
+    // -> modified_by défini lors d’un UPDATE (ON CONFLICT)
     await db.query(`
       INSERT INTO drivers (phone, name, marque, modele, plaque, couleur, solde, photo, created_by_agent_id)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
       ON CONFLICT (phone) DO UPDATE SET
-        name   = EXCLUDED.name,
-        marque = EXCLUDED.marque,
-        modele = EXCLUDED.modele,
-        plaque = EXCLUDED.plaque,
-        couleur= EXCLUDED.couleur,
-        photo  = COALESCE(drivers.photo, EXCLUDED.photo),
-        created_by_agent_id = COALESCE(drivers.created_by_agent_id, EXCLUDED.created_by_agent_id)
+        name    = EXCLUDED.name,
+        marque  = EXCLUDED.marque,
+        modele  = EXCLUDED.modele,
+        plaque  = EXCLUDED.plaque,
+        couleur = EXCLUDED.couleur,
+        photo   = COALESCE(drivers.photo, EXCLUDED.photo),
+        modified_by = $10
     `, [
       phone,
       name,
       vehicle_make || null,
       vehicle_type || null,
       plate || null,
-      color || null,             // -> couleur
-      DEFAULT_SOLDE,             // (création) solde initial
-      photo || DEFAULT_PHOTO,    // photo par défaut
-      agentId
+      color || null,
+      DEFAULT_SOLDE,               // uniquement en INSERT
+      photo || DEFAULT_PHOTO,
+      agentId,                     // created_by_agent_id (INSERT)
+      agentId,                     // modified_by (UPDATE)
     ]);
 
     res.status(201).json({ success: true });
@@ -290,6 +294,7 @@ router.post('/admin/driver', async (req, res) => {
     res.status(500).json({ error: 'server error', details: e.message });
   }
 });
+
 
 
 
@@ -381,6 +386,7 @@ router.post('/admin/driver/:phone/update_solde', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
