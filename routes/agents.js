@@ -2,7 +2,6 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { v4: uuidv4 } = require('uuid');
 const twilio = require('twilio');
 
 const TWILIO_SID   = process.env.TWILIO_SID   || process.env.TWILIO_ACCOUNT_SID;
@@ -54,7 +53,7 @@ router.post('/:phone/request_otp', async (req, res) => {
   }
 });
 
-// 2) Vérifier OTP -> transformer en token UUID (90 jours)
+// 2) Vérifier OTP → on efface l’OTP et on renvoie l’agent (pas de token)
 router.post('/:phone/verify_otp', async (req, res) => {
   try {
     const phone = decodeURIComponent(req.params.phone);
@@ -69,17 +68,5 @@ router.post('/:phone/verify_otp', async (req, res) => {
     if (!otp_code || otp_code !== ag.otp_code) return res.status(401).json({ error: 'OTP incorrect' });
     if (!ag.otp_expires || new Date(ag.otp_expires) < new Date()) return res.status(403).json({ error: 'OTP expiré' });
 
-    const token = uuidv4(); // session côté client, stockée en SharedPreferences
-    await db.query(
-      "UPDATE agents SET otp_code=$1, otp_expires=NOW() + INTERVAL '90 days' WHERE id=$2",
-      [token, ag.id]
-    );
-
-    res.json({ success: true, token, agent: { id: ag.id, name: ag.name, phone: ag.phone } });
-  } catch (e) {
-    console.error('agents/verify_otp', e);
-    res.status(500).json({ error: 'server error' });
-  }
-});
-
-module.exports = router;
+    // efface l’OTP comme pour chauffeur
+    await db.query("UPDATE agents SET otp_code=NULL, otp_expires=NULL WHERE id=$1", [ag.id]()
