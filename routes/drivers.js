@@ -337,42 +337,59 @@ router.get('/admin/driver/:phone', async (req, res) => {
 
 
 
-// ADMIN: MAJ solde + historique
+// ADMIN: recharge solde (montant positif uniquement)
 router.post('/admin/driver/:phone/update_solde', async (req, res) => {
   const agentPhone = req.header('X-Agent-Phone');
   if (!agentPhone) return res.status(401).json({ error: 'X-Agent-Phone header required' });
 
   try {
+    // Agent
     const ag = await db.query('SELECT id FROM agents WHERE phone=$1', [agentPhone]);
     if (ag.rows.length === 0) return res.status(401).json({ error: 'Unknown agent phone' });
     const agentId = ag.rows[0].id;
 
+    // Inputs
     const phone = decodeURIComponent(req.params.phone);
-    const { new_solde, delta, reason } = req.body || {};
+    // On accepte 'amount' (nouveau) ou 'delta' (ancien) — tous deux doivent être > 0
+    const raw = (req.body && (req.body.amount ?? req.body.delta));
+    const amount = Number.parseInt(raw, 10);
+    const method = (req.body && req.body.method) || null; // ex: "cash"
+    const note   = (req.body && req.body.note)   || null; // texte libre
 
-    const r = await db.query('SELECT solde FROM drivers WHERE phone=$1', [phone]);
-    if (r.rows.length === 0) return res.status(404).json({ error: 'not found' });
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ error: 'amount must be a positive integer' });
+    }
 
-    const oldSolde = r.rows[0].solde || 0;
-    let newVal;
-    if (typeof new_solde === 'number') newVal = Math.max(0, Math.trunc(new_solde));
-    else if (typeof delta === 'number') newVal = Math.max(0, oldSolde + Math.trunc(delta));
-    else return res.status(400).json({ error: 'new_solde or delta required' });
+    await db.query('BEGIN');
 
-    const d = (typeof delta === 'number') ? Math.trunc(delta) : (newVal - oldSolde);
+    // Verrouille le chauffeur pour éviter des races
+    const r0 = await db.query('SELECT solde FROM drivers WHERE phone=$1 FOR UPDATE', [phone]);
+    if (r0.rows.length === 0) {
+      await db.query('ROLLBACK');
+      return res.status(404).json({ error: 'driver not found' });
+    }
 
-    await db.query('UPDATE drivers SET solde=$1 WHERE phone=$2', [newVal, phone]);
+    const oldSolde = r0.rows[0].solde || 0;
+    const newSolde = oldSolde + amount;
+
+    await db.query('UPDATE drivers SET solde=$1 WHERE phone=$2', [newSolde, phone]);
+
+    const reason = method ? `Recharge (${method})${note ? ' - ' + note : ''}` : (note || 'Recharge');
+
     await db.query(
       'INSERT INTO solde_history (driver_phone, agent_id, old_solde, delta, new_solde, reason) VALUES ($1,$2,$3,$4,$5,$6)',
-      [phone, agentId, oldSolde, d, newVal, reason || null]
+      [phone, agentId, oldSolde, amount, newSolde, reason]
     );
 
-    res.json({ success: true, new_solde: newVal });
+    await db.query('COMMIT');
+    return res.json({ success: true, added: amount, new_solde: newSolde });
   } catch (e) {
-    console.error('admin update solde', e);
-    res.status(500).json({ error: 'server error' });
+    console.error('admin update_solde (recharge)', e);
+    try { await db.query('ROLLBACK'); } catch (_) {}
+    return res.status(500).json({ error: 'server error', details: e.message });
   }
 });
+
 
 //§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 
@@ -386,6 +403,7 @@ router.post('/admin/driver/:phone/update_solde', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
