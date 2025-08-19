@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
+const requireAgent = require('../middleware/requireAgent');
 const allowReviewer = process.env.ALLOW_REVIEWER_OTP === 'true';
 const reviewerPhone = process.env.REVIEWER_PHONE_DRIVER;
 const reviewerOtp   = process.env.REVIEWER_OTP_DRIVER;
@@ -239,7 +240,91 @@ router.post('/:phone/ping_position', async (req, res) => {
 
 
 
+
+
+// ADMIN: créer / MAJ chauffeur (attaché à l'agent créateur)
+router.post('/admin/driver', requireAgent, async (req, res) => {
+  const { name, phone, vehicle_make, vehicle_type, plate, color } = req.body || {};
+  if (!name || !phone) return res.status(400).json({ error: 'name and phone required' });
+
+  try {
+    await db.query(`
+      INSERT INTO drivers (phone, name, vehicle_make, vehicle_type, plate, color, created_by_agent_id)
+      VALUES ($1,$2,$3,$4,$5,$6,$7)
+      ON CONFLICT (phone) DO UPDATE SET
+        name=EXCLUDED.name,
+        vehicle_make=EXCLUDED.vehicle_make,
+        vehicle_type=EXCLUDED.vehicle_type,
+        plate=EXCLUDED.plate,
+        color=EXCLUDED.color,
+        created_by_agent_id=COALESCE(drivers.created_by_agent_id, EXCLUDED.created_by_agent_id)
+    `, [phone, name, vehicle_make || null, vehicle_type || null, plate || null, color || null, req.agent.id]);
+
+    res.status(201).json({ success: true });
+  } catch (e) {
+    console.error('admin upsert driver', e);
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
+// ADMIN: lire un chauffeur
+router.get('/admin/driver/:phone', requireAgent, async (req, res) => {
+  const phone = decodeURIComponent(req.params.phone);
+  try {
+    const r = await db.query(
+      `SELECT phone, name, vehicle_make, vehicle_type, plate, color, available, solde, created_by_agent_id
+       FROM drivers WHERE phone=$1`,
+      [phone]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'not found' });
+    res.json(r.rows[0]);
+  } catch (e) {
+    console.error('admin get driver', e);
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
+// ADMIN: mise à jour solde + historique
+router.post('/admin/driver/:phone/update_solde', requireAgent, async (req, res) => {
+  const phone = decodeURIComponent(req.params.phone);
+  const { new_solde, delta, reason } = req.body || {};
+  try {
+    const r = await db.query('SELECT solde FROM drivers WHERE phone=$1', [phone]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'not found' });
+
+    const oldSolde = r.rows[0].solde || 0;
+    let newVal;
+    if (typeof new_solde === 'number') newVal = Math.max(0, Math.trunc(new_solde));
+    else if (typeof delta === 'number') newVal = Math.max(0, oldSolde + Math.trunc(delta));
+    else return res.status(400).json({ error: 'new_solde or delta required' });
+
+    const d = (typeof delta === 'number') ? Math.trunc(delta) : (newVal - oldSolde);
+
+    await db.query('UPDATE drivers SET solde=$1 WHERE phone=$2', [newVal, phone]);
+    await db.query(
+      'INSERT INTO solde_history (driver_phone, agent_id, old_solde, delta, new_solde, reason) VALUES ($1,$2,$3,$4,$5,$6)',
+      [phone, req.agent.id, oldSolde, d, newVal, reason || null]
+    );
+
+    res.json({ success: true, new_solde: newVal });
+  } catch (e) {
+    console.error('admin update solde', e);
+    res.status(500).json({ error: 'server error' });
+  }
+});
+//§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+
+
+
+
+
+
+
+
+
+
 module.exports = router;
+
 
 
 
