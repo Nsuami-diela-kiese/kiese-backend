@@ -242,12 +242,18 @@ router.post('/:phone/ping_position', async (req, res) => {
 
 
 
-// ADMIN: créer / MAJ chauffeur (attaché à l'agent créateur)
-router.post('/admin/driver', requireAgent, async (req, res) => {
+// ADMIN: créer / MAJ chauffeur (agent identifié par son téléphone)
+router.post('/admin/driver', async (req, res) => {
   const { name, phone, vehicle_make, vehicle_type, plate, color } = req.body || {};
+  const agentPhone = req.header('X-Agent-Phone'); // <-- comme chauffeur, on passe le phone
+  if (!agentPhone) return res.status(401).json({ error: 'X-Agent-Phone header required' });
   if (!name || !phone) return res.status(400).json({ error: 'name and phone required' });
 
   try {
+    const ar = await db.query('SELECT id FROM agents WHERE phone=$1', [agentPhone]);
+    if (ar.rows.length === 0) return res.status(401).json({ error: 'Unknown agent phone' });
+    const agentId = ar.rows[0].id;
+
     await db.query(`
       INSERT INTO drivers (phone, name, vehicle_make, vehicle_type, plate, color, created_by_agent_id)
       VALUES ($1,$2,$3,$4,$5,$6,$7)
@@ -258,7 +264,7 @@ router.post('/admin/driver', requireAgent, async (req, res) => {
         plate=EXCLUDED.plate,
         color=EXCLUDED.color,
         created_by_agent_id=COALESCE(drivers.created_by_agent_id, EXCLUDED.created_by_agent_id)
-    `, [phone, name, vehicle_make || null, vehicle_type || null, plate || null, color || null, req.agent.id]);
+    `, [phone, name, vehicle_make || null, vehicle_type || null, plate || null, color || null, agentId]);
 
     res.status(201).json({ success: true });
   } catch (e) {
@@ -268,9 +274,15 @@ router.post('/admin/driver', requireAgent, async (req, res) => {
 });
 
 // ADMIN: lire un chauffeur
-router.get('/admin/driver/:phone', requireAgent, async (req, res) => {
-  const phone = decodeURIComponent(req.params.phone);
+router.get('/admin/driver/:phone', async (req, res) => {
+  const agentPhone = req.header('X-Agent-Phone');
+  if (!agentPhone) return res.status(401).json({ error: 'X-Agent-Phone header required' });
+
   try {
+    const ar = await db.query('SELECT 1 FROM agents WHERE phone=$1', [agentPhone]);
+    if (ar.rows.length === 0) return res.status(401).json({ error: 'Unknown agent phone' });
+
+    const phone = decodeURIComponent(req.params.phone);
     const r = await db.query(
       `SELECT phone, name, vehicle_make, vehicle_type, plate, color, available, solde, created_by_agent_id
        FROM drivers WHERE phone=$1`,
@@ -284,11 +296,19 @@ router.get('/admin/driver/:phone', requireAgent, async (req, res) => {
   }
 });
 
-// ADMIN: mise à jour solde + historique
-router.post('/admin/driver/:phone/update_solde', requireAgent, async (req, res) => {
-  const phone = decodeURIComponent(req.params.phone);
-  const { new_solde, delta, reason } = req.body || {};
+// ADMIN: MAJ solde + historique
+router.post('/admin/driver/:phone/update_solde', async (req, res) => {
+  const agentPhone = req.header('X-Agent-Phone');
+  if (!agentPhone) return res.status(401).json({ error: 'X-Agent-Phone header required' });
+
   try {
+    const ag = await db.query('SELECT id FROM agents WHERE phone=$1', [agentPhone]);
+    if (ag.rows.length === 0) return res.status(401).json({ error: 'Unknown agent phone' });
+    const agentId = ag.rows[0].id;
+
+    const phone = decodeURIComponent(req.params.phone);
+    const { new_solde, delta, reason } = req.body || {};
+
     const r = await db.query('SELECT solde FROM drivers WHERE phone=$1', [phone]);
     if (r.rows.length === 0) return res.status(404).json({ error: 'not found' });
 
@@ -303,7 +323,7 @@ router.post('/admin/driver/:phone/update_solde', requireAgent, async (req, res) 
     await db.query('UPDATE drivers SET solde=$1 WHERE phone=$2', [newVal, phone]);
     await db.query(
       'INSERT INTO solde_history (driver_phone, agent_id, old_solde, delta, new_solde, reason) VALUES ($1,$2,$3,$4,$5,$6)',
-      [phone, req.agent.id, oldSolde, d, newVal, reason || null]
+      [phone, agentId, oldSolde, d, newVal, reason || null]
     );
 
     res.json({ success: true, new_solde: newVal });
@@ -312,6 +332,7 @@ router.post('/admin/driver/:phone/update_solde', requireAgent, async (req, res) 
     res.status(500).json({ error: 'server error' });
   }
 });
+
 //§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
 
 
@@ -324,6 +345,7 @@ router.post('/admin/driver/:phone/update_solde', requireAgent, async (req, res) 
 
 
 module.exports = router;
+
 
 
 
