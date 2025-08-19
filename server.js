@@ -19,7 +19,8 @@ app.use('/api/ride', rideRoutes);
 const driverRoutes = require('./routes/drivers');
 app.use('/api/driver', driverRoutes);
 
-
+const agentsRoutes = require('./routes/agents');
+app.use('/api/agent', agentsRoutes);
 
 
 // ✅ PORT
@@ -31,5 +32,6 @@ console.log("✅ TWILIO_PHONE:", process.env.TWILIO_PHONE);
 app.listen(PORT, () => {
   console.log(`✅ Serveur démarré sur le port ${PORT}`);
 });
+
 
 
