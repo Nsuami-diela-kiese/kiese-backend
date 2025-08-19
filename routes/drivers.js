@@ -243,7 +243,7 @@ router.post('/:phone/ping_position', async (req, res) => {
 
 // ADMIN: créer / MAJ chauffeur (agent identifié par son téléphone)
 router.post('/admin/driver', async (req, res) => {
-  const { name, phone, vehicle_make, vehicle_type, plate, color } = req.body || {};
+  const { name, phone, marque, modele, plaque, couleur } = req.body || {};
   const agentPhone = req.header('X-Agent-Phone'); // <-- comme chauffeur, on passe le phone
   if (!agentPhone) return res.status(401).json({ error: 'X-Agent-Phone header required' });
   if (!name || !phone) return res.status(400).json({ error: 'name and phone required' });
@@ -254,16 +254,16 @@ router.post('/admin/driver', async (req, res) => {
     const agentId = ar.rows[0].id;
 
     await db.query(`
-      INSERT INTO drivers (phone, name, vehicle_make, vehicle_type, plate, color, created_by_agent_id)
+      INSERT INTO drivers (phone, name, marque, modele, plaque, couleur, created_by_agent_id)
       VALUES ($1,$2,$3,$4,$5,$6,$7)
       ON CONFLICT (phone) DO UPDATE SET
         name=EXCLUDED.name,
-        vehicle_make=EXCLUDED.vehicle_make,
-        vehicle_type=EXCLUDED.vehicle_type,
-        plate=EXCLUDED.plate,
-        color=EXCLUDED.color,
+        marque=EXCLUDED.marque,
+        modele=EXCLUDED.modele,
+        plaque=EXCLUDED.plaque,
+        couleur=EXCLUDED.couleur,
         created_by_agent_id=COALESCE(drivers.created_by_agent_id, EXCLUDED.created_by_agent_id)
-    `, [phone, name, vehicle_make || null, vehicle_type || null, plate || null, color || null, agentId]);
+    `, [phone, name, marque || null, modele || null, plaque || null, couleur || null, agentId]);
 
     res.status(201).json({ success: true });
   } catch (e) {
@@ -287,7 +287,7 @@ router.get('/admin/driver/:phone', async (req, res) => {
 
     const phone = decodeURIComponent(req.params.phone);
     const r = await db.query(
-      `SELECT phone, name, vehicle_make, vehicle_type, plate, color, available, solde, created_by_agent_id
+      `SELECT phone, name, marque, modele, plaque, couleur, available, solde, created_by_agent_id
        FROM drivers WHERE phone=$1`,
       [phone]
     );
@@ -348,6 +348,7 @@ router.post('/admin/driver/:phone/update_solde', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
