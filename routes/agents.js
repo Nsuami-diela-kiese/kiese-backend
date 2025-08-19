@@ -69,4 +69,4 @@ router.post('/:phone/verify_otp', async (req, res) => {
     if (!ag.otp_expires || new Date(ag.otp_expires) < new Date()) return res.status(403).json({ error: 'OTP expiré' });
 
     // efface l’OTP comme pour chauffeur
-    await db.query("UPDATE agents SET otp_code=NULL, otp_expires=NULL WHERE id=$1", [ag.id]()
+    await db.query("UPDATE agents SET otp_code=NULL, otp_expires=NULL WHERE id=$1", [ag.id])
