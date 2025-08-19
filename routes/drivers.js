@@ -243,8 +243,8 @@ router.post('/:phone/ping_position', async (req, res) => {
 
 // ADMIN: créer / MAJ chauffeur (agent identifié par son téléphone)
 router.post('/admin/driver', async (req, res) => {
-  const { name, phone, marque, modele, plaque, couleur } = req.body || {};
-  const agentPhone = req.header('X-Agent-Phone'); // <-- comme chauffeur, on passe le phone
+  const { name, phone, vehicle_make, vehicle_type, plate, color, photo } = req.body || {};
+  const agentPhone = req.header('X-Agent-Phone');
   if (!agentPhone) return res.status(401).json({ error: 'X-Agent-Phone header required' });
   if (!name || !phone) return res.status(400).json({ error: 'name and phone required' });
 
@@ -253,30 +253,48 @@ router.post('/admin/driver', async (req, res) => {
     if (ar.rows.length === 0) return res.status(401).json({ error: 'Unknown agent phone' });
     const agentId = ar.rows[0].id;
 
+    const DEFAULT_SOLDE = 50000; // à la création uniquement
+    const DEFAULT_PHOTO = 'https://via.placeholder.com/100';
+
+    // Mapping:
+    // vehicle_make -> marque
+    // vehicle_type -> modele
+    // plate        -> plaque
+    // color        -> couleur  ✅
     await db.query(`
-      INSERT INTO drivers (phone, name, marque, modele, plaque, couleur, created_by_agent_id)
-      VALUES ($1,$2,$3,$4,$5,$6,$7)
+      INSERT INTO drivers (phone, name, marque, modele, plaque, couleur, solde, photo, created_by_agent_id)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
       ON CONFLICT (phone) DO UPDATE SET
-        name=EXCLUDED.name,
-        marque=EXCLUDED.marque,
-        modele=EXCLUDED.modele,
-        plaque=EXCLUDED.plaque,
-        couleur=EXCLUDED.couleur,
-        created_by_agent_id=COALESCE(drivers.created_by_agent_id, EXCLUDED.created_by_agent_id)
-    `, [phone, name, marque || null, modele || null, plaque || null, couleur || null, agentId]);
+        name   = EXCLUDED.name,
+        marque = EXCLUDED.marque,
+        modele = EXCLUDED.modele,
+        plaque = EXCLUDED.plaque,
+        couleur= EXCLUDED.couleur,
+        photo  = COALESCE(drivers.photo, EXCLUDED.photo),
+        created_by_agent_id = COALESCE(drivers.created_by_agent_id, EXCLUDED.created_by_agent_id)
+    `, [
+      phone,
+      name,
+      vehicle_make || null,
+      vehicle_type || null,
+      plate || null,
+      color || null,             // -> couleur
+      DEFAULT_SOLDE,             // (création) solde initial
+      photo || DEFAULT_PHOTO,    // photo par défaut
+      agentId
+    ]);
 
     res.status(201).json({ success: true });
   } catch (e) {
     console.error('admin upsert driver', e);
-    return res.status(500).json({
-    error: 'server error',
-    details: e.message,            // 👈 TEMP : à retirer plus tard
-  });
-    
+    res.status(500).json({ error: 'server error', details: e.message });
   }
 });
 
+
+
 // ADMIN: lire un chauffeur
+
 router.get('/admin/driver/:phone', async (req, res) => {
   const agentPhone = req.header('X-Agent-Phone');
   if (!agentPhone) return res.status(401).json({ error: 'X-Agent-Phone header required' });
@@ -287,17 +305,32 @@ router.get('/admin/driver/:phone', async (req, res) => {
 
     const phone = decodeURIComponent(req.params.phone);
     const r = await db.query(
-      `SELECT phone, name, marque, modele, plaque, couleur, available, solde, created_by_agent_id
+      `SELECT phone, name, marque, modele, plaque, couleur, available, solde, created_by_agent_id, photo
        FROM drivers WHERE phone=$1`,
       [phone]
     );
     if (r.rows.length === 0) return res.status(404).json({ error: 'not found' });
-    res.json(r.rows[0]);
+
+    const d = r.rows[0];
+    res.json({
+      phone: d.phone,
+      name: d.name,
+      vehicle_make: d.marque,
+      vehicle_type: d.modele,
+      plate: d.plaque,
+      color: d.couleur,              // ✅ couleur -> color (pour l’app)
+      available: d.available,
+      solde: d.solde,
+      created_by_agent_id: d.created_by_agent_id,
+      photo: d.photo,
+    });
   } catch (e) {
     console.error('admin get driver', e);
-    res.status(500).json({ error: 'server error' });
+    res.status(500).json({ error: 'server error', details: e.message });
   }
 });
+
+
 
 // ADMIN: MAJ solde + historique
 router.post('/admin/driver/:phone/update_solde', async (req, res) => {
@@ -348,6 +381,7 @@ router.post('/admin/driver/:phone/update_solde', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
