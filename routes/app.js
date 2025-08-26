@@ -8,7 +8,7 @@ router.get('/recharge_numbers', async (_req, res) => {
   try {
     const r = await db.query(
       `SELECT key, value FROM app_settings 
-       WHERE key IN ('Mpesa','Airtel Money','Orange Money')`
+       WHERE key IN ('recharge_mpesa','recharge_airtel','recharge_orange')`
     );
     const map = Object.fromEntries(r.rows.map(x => [x.key, x.value]));
     res.json({
@@ -35,9 +35,9 @@ router.post('/recharge_numbers', async (req, res) => {
         );
       }
     };
-    await up('Mpesa', mpesa);
-    await up('Airtel Money', airtel);
-    await up('Orange Money', orange);
+    await up('recharge_mpesa', mpesa);
+    await up('recharge_airtel', airtel);
+    await up('recharge_orange', orange);
     res.json({ ok: true });
   } catch (e) {
     console.error('update recharge_numbers error:', e);
@@ -46,4 +46,3 @@ router.post('/recharge_numbers', async (req, res) => {
 });
 
 module.exports = router;
-
