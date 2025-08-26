@@ -3,6 +3,14 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const axios = require('axios');
+const { sendFcm } = require('../utils/fcm'); // 🔔 FCM Admin
+
+// petit helper pour récupérer le token FCM du chauffeur
+async function getDriverFcmTokenByPhone(phone) {
+  if (!phone) return null;
+  const r = await db.query('SELECT fcm_token FROM drivers WHERE phone=$1', [phone]);
+  return r.rows[0]?.fcm_token || null;
+}
 
 
 // 🛺 Crée une course
@@ -376,6 +384,26 @@ router.post('/:id/discussion', async (req, res) => {
       await db.query(`UPDATE rides SET client_accepted = false WHERE id = $1`, [rideId]);
     }
 
+    try {
+  const rideIdNum = Number(rideId);
+
+  // ici on notifie surtout le chauffeur
+  const r1 = await db.query('SELECT driver_phone FROM rides WHERE id=$1', [rideIdNum]);
+  const driverPhone = r1.rows[0]?.driver_phone;
+
+  const token = await getDriverFcmTokenByPhone(driverPhone);
+  if (token) {
+    await sendFcm(
+      token,
+      { title: '💬 Nouvelle proposition', body: `${from} a proposé ${amount || ''} CDF`.trim() },
+      { type: 'nego_update', ride_id: String(rideIdNum) }
+    );
+  }
+} catch (e) {
+  console.error('Notif nego_update:', e);
+}
+
+
     res.json({ success: true });
   } catch (e) {
     console.error("❌ Erreur discussion:", e);
@@ -418,7 +446,7 @@ router.post('/create_auto', async (req, res) => {
 
   try {
     const chauffeurRes = await db.query(
-      "SELECT phone, lat, lng FROM drivers WHERE available = true AND last_seen > NOW() - INTERVAL '10 minutes' AND solde >= 3000 ORDER BY SQRT(POWER(lat - $1, 2) + POWER(lng - $2, 2)) ASC LIMIT 1",
+      "SELECT phone, lat, lng FROM drivers WHERE available = true AND solde >= 3000 ORDER BY SQRT(POWER(lat - $1, 2) + POWER(lng - $2, 2)) ASC LIMIT 1",
       [origin_lat, origin_lng]
     );
 
@@ -480,6 +508,23 @@ router.post('/create_auto', async (req, res) => {
 router.post('/:id/cancel', async (req, res) => {
   const rideId = req.params.id;
   await db.query("UPDATE rides SET status = 'annulee' WHERE id = $1", [rideId]);
+
+  try {
+  const rideIdNum = Number(rideId);
+  const r = await db.query('SELECT driver_phone FROM rides WHERE id=$1', [rideIdNum]);
+  const token = await getDriverFcmTokenByPhone(r.rows[0]?.driver_phone);
+  if (token) {
+    await sendFcm(
+      token,
+      { title: '❌ Course annulée', body: 'La course a été annulée' },
+      { type: 'status_update', ride_id: String(rideIdNum) }
+    );
+  }
+} catch (e) {
+  console.error('Notif cancel:', e);
+}
+
+
   res.json({ success: true });
 });
 // ? Terminer une course
@@ -519,6 +564,22 @@ if (!route) return res.status(400).json({ error: "Route manquante" });
       WHERE phone = $2
     `, [commission, driverId]);
 
+    try {
+  const rideIdNum = Number(rideId);
+  const r = await db.query('SELECT driver_phone FROM rides WHERE id=$1', [rideIdNum]);
+  const token = await getDriverFcmTokenByPhone(r.rows[0]?.driver_phone);
+  if (token) {
+    await sendFcm(
+      token,
+      { title: '✅ Course terminée', body: 'Merci pour votre conduite' },
+      { type: 'status_update', ride_id: String(rideIdNum) }
+    );
+  }
+} catch (e) {
+  console.error('Notif finish:', e);
+}
+
+
     res.json({ success: true, commission });
   } catch (e) {
     console.error("Erreur finish :", e);
@@ -541,7 +602,7 @@ router.post('/create_negociation', async (req, res) => {
 
   try {
     const chauffeurRes = await db.query(
-      "SELECT phone, name, lat, lng, plaque, couleur, photo, marque, modele FROM drivers WHERE available = true AND last_seen > NOW() - INTERVAL '10 minutes' AND solde >= 3000 ORDER BY SQRT(POWER(lat - $1, 2) + POWER(lng - $2, 2)) ASC LIMIT 1",
+      "SELECT phone, name, lat, lng, plaque, couleur, photo, marque, modele FROM drivers WHERE available = true AND solde >= 3000 ORDER BY SQRT(POWER(lat - $1, 2) + POWER(lng - $2, 2)) ASC LIMIT 1",
       [origin_lat, origin_lng]
     );
 
@@ -582,6 +643,21 @@ router.post('/create_negociation', async (req, res) => {
         messageInitial
       ]
     );
+
+    try {
+  const rideId = insertRes.rows[0].id;
+  const token = await getDriverFcmTokenByPhone(chauffeur.phone);
+  if (token) {
+    await sendFcm(
+      token,
+      { title: '🚗 Nouvelle course', body: 'Un client attend votre réponse' },
+      { type: 'new_ride', ride_id: String(rideId) } // 👈 data que lit l’app chauffeur
+    );
+  }
+} catch (e) {
+  console.error('Notif new_ride (create_negociation):', e);
+}
+
 
     res.status(201).json({
       ride_id: insertRes.rows[0].id,
