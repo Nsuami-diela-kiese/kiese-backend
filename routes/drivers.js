@@ -392,8 +392,22 @@ router.post('/admin/driver/:phone/update_solde', async (req, res) => {
 
 
 //§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§§
+// Enregistre / met à jour le token FCM d’un chauffeur
+router.post("/:phone/fcm_token", async (req, res) => {
+  try {
+    const { phone } = req.params;
+    const { token } = req.body || {};
+    if (!token) return res.status(400).json({ error: "token manquant" });
 
+    await db.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS fcm_token text`);
+    await db.query(`UPDATE drivers SET fcm_token=$1 WHERE phone=$2`, [token, phone]);
 
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("fcm_token:", e);
+    res.status(500).json({ error: "server error" });
+  }
+});
 
 
 
