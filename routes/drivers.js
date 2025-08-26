@@ -413,10 +413,33 @@ router.post("/:phone/fcm_token", async (req, res) => {
 
 
 
+router.get('/:phone/manager', async (req, res) => {
+  const phone = req.params.phone;
+  try {
+    const q = `
+      SELECT a.name AS manager_name, a.phone AS manager_phone
+      FROM drivers d
+      LEFT JOIN agents a ON a.id = d.created_by_agent_id
+      WHERE d.phone = $1
+      LIMIT 1
+    `;
+    const r = await db.query(q, [phone]);
+    if (r.rows.length === 0) {
+      return res.json({ manager_name: null, manager_phone: null });
+    }
+    res.json(r.rows[0]);
+  } catch (e) {
+    console.error('manager lookup error:', e);
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
+
 
 
 
 module.exports = router;
+
 
 
 
