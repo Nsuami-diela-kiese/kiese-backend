@@ -8,7 +8,7 @@ router.get('/recharge_numbers', async (_req, res) => {
   try {
     const r = await db.query(
       `SELECT key, value FROM app_settings 
-       WHERE key IN ('recharge_mpesa','recharge_airtel','recharge_orange')`
+       WHERE key IN ('Mpesa','Airtel Money','Orange Money')`
     );
     const map = Object.fromEntries(r.rows.map(x => [x.key, x.value]));
     res.json({
