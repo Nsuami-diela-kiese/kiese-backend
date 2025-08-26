@@ -384,24 +384,40 @@ router.post('/:id/discussion', async (req, res) => {
       await db.query(`UPDATE rides SET client_accepted = false WHERE id = $1`, [rideId]);
     }
 
-    try {
+   // ... après avoir mis à jour discussion / proposed_price / client_accepted ...
+
+// 🔔 Notifier uniquement l'AUTRE partie
+try {
   const rideIdNum = Number(rideId);
 
-  // ici on notifie surtout le chauffeur
-  const r1 = await db.query('SELECT driver_phone FROM rides WHERE id=$1', [rideIdNum]);
-  const driverPhone = r1.rows[0]?.driver_phone;
-
-  const token = await getDriverFcmTokenByPhone(driverPhone);
-  if (token) {
-    await sendFcm(
-      token,
-      { title: '💬 Nouvelle proposition', body: `${from} a proposé ${amount || ''} CDF`.trim() },
-      { type: 'nego_update', ride_id: String(rideIdNum) }
-    );
+  // 👉 On ne notifie le chauffeur QUE si le message vient du client
+  if (from === 'client') {
+    const r1 = await db.query('SELECT driver_phone FROM rides WHERE id=$1', [rideIdNum]);
+    const driverPhone = r1.rows[0]?.driver_phone;
+    const token = await getDriverFcmTokenByPhone(driverPhone);
+    if (token) {
+      await sendFcm(
+        token,
+        {
+          title: '💬 Nouvelle proposition',
+          body: (amount ? `Le client a proposé ${amount} CDF` : 'Mise à jour de la négociation'),
+        },
+        {
+          type: 'nego_update',
+          ride_id: String(rideIdNum),
+          sender: 'client',           // (optionnel) utile si tu veux filtrer côté app
+        }
+      );
+    }
   }
+
+  // NOTE: plus tard, quand tu auras un fcm_token côté client,
+  //       tu pourras ajouter l’inverse ici :
+  //       if (from === 'chauffeur') => sendFcm(tokenClient, ...)
 } catch (e) {
   console.error('Notif nego_update:', e);
 }
+
 
 
     res.json({ success: true });
@@ -811,3 +827,4 @@ router.get('/:id/negociations', async (req, res) => {
 
 
 module.exports = router;
+
