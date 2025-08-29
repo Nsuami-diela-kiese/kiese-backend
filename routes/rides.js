@@ -13,6 +13,9 @@ async function getDriverFcmTokenByPhone(phone) {
   return r.rows[0]?.fcm_token || null;
 }
 
+router.get('/__ping', (req, res) => {
+  res.json({ ok: true, at: new Date().toISOString() });
+});
 
 // 🛺 Crée une course
 router.post('/create', async (req, res) => {
@@ -860,5 +863,6 @@ router.post('/api/ride/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
