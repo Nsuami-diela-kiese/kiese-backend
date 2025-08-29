@@ -4,6 +4,7 @@ const router = express.Router();
 const db = require('../db');
 const axios = require('axios');
 const { sendFcm } = require('../utils/fcm'); // 🔔 FCM Admin
+const { reassignDriverForRide } = require('../utils/reassign');
 
 // petit helper pour récupérer le token FCM du chauffeur
 async function getDriverFcmTokenByPhone(phone) {
@@ -826,5 +827,38 @@ router.get('/:id/negociations', async (req, res) => {
 
 
 
+
+
+
+
+/**
+ * POST /api/ride/:id/reassign_driver
+ * Réassigne automatiquement un nouveau chauffeur.
+ */
+router.post('/api/ride/:id/reassign_driver', async (req, res) => {
+  const rideId = Number(req.params.id || 0);
+  if (!rideId) return res.status(400).json({ error: 'INVALID_RIDE_ID' });
+
+  try {
+    const r = await reassignDriverForRide(rideId);
+    if (!r.ok) {
+      if (r.reason === 'NO_DRIVER_AVAILABLE') return res.status(404).json({ error: r.reason });
+      if (r.reason === 'MAX_ATTEMPTS_REACHED') return res.status(409).json({ error: r.reason });
+      if (r.reason === 'RIDE_NOT_FOUND') return res.status(404).json({ error: r.reason });
+      return res.status(500).json({ error: 'REASSIGN_FAILED' });
+    }
+    return res.status(200).json({ driver: r.driver });
+  } catch (e) {
+    console.error('reassign_driver error', e);
+    return res.status(500).json({ error: 'SERVER_ERROR' });
+  }
+});
+
+
+
+
+
+
 module.exports = router;
+
 
