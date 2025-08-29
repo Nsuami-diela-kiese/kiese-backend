@@ -5,7 +5,6 @@ const db = require('../db');
 const axios = require('axios');
 const { sendFcm } = require('../utils/fcm'); // 🔔 FCM Admin
 const { reassignDriverForRide } = require('../utils/reassign');
-const { sendFcm, getDriverFcmTokenByPhone } = require('../utils/fcm');
 
 // petit helper pour récupérer le token FCM du chauffeur
 async function getDriverFcmTokenByPhone(phone) {
@@ -317,61 +316,61 @@ router.post('/:id/discussion', async (req, res) => {
   const rideId = req.params.id;
   const body = req.body;
 
-  console.log("🟢 BODY REÇU :", body);
+  console.log('🟢 BODY REÇU :', body);
 
   if (!body || !body.from || !body.type) {
-    return res.status(400).json({ error: "Corps invalide ou manquant", received: body });
+    return res.status(400).json({ error: 'Corps invalide ou manquant', received: body });
   }
 
   const { from, amount, type } = body;
 
   try {
-    let message = `${from}:${amount}`;
+    let message = `${from}:${amount ?? ''}`;
 
     if (type === 'last_offer') {
       message += ':last_offer';
       await db.query(
         `UPDATE rides SET last_offer_from = $1, last_offer_value = $2 WHERE id = $3`,
-        [from, amount, rideId]
+        [from, amount ?? null, rideId]
       );
     } else if (type === 'accept') {
       message += ':accepted';
-
       if (from === 'client') {
         await db.query(`UPDATE rides SET client_accepted = true WHERE id = $1`, [rideId]);
       }
     } else if (type === 'refuse') {
-      // === Ta logique existante pour l'annulation sur "dernière offre" ===
-      const result = await db.query(
+      // Lire état utile
+      const r0 = await db.query(
         `SELECT last_offer_from, discussion, driver_phone, contacted_driver_phones
            FROM rides WHERE id = $1`,
         [rideId]
       );
-
-      const lastOfferFrom = result.rows[0]?.last_offer_from;
-      const discussion = result.rows[0]?.discussion || [];
-      const lastMsg = discussion.length > 0 ? discussion[discussion.length - 1] : "";
+      const row = r0.rows[0] || {};
+      const lastOfferFrom = row.last_offer_from;
+      const discussion = row.discussion || [];
+      const lastMsg = discussion.length > 0 ? discussion[discussion.length - 1] : '';
       const lastWasLastOffer = lastMsg.includes(':last_offer');
-      const currDriver = result.rows[0]?.driver_phone || null;
-      const contacted = result.rows[0]?.contacted_driver_phones || [];
+      const currDriver = row.driver_phone || null;
+      const contacted = row.contacted_driver_phones || [];
 
       message += ':refused';
 
-      // 👉 Nouveau : si le CHAUFFEUR refuse => on tente une réassignation immédiate
+      // Si le chauffeur refuse → on réassigne immédiatement
       if (from === 'chauffeur') {
-        // Marquer l'offre refusée/analyse précédente
+        // (trace) si refus d’une "dernière offre" opposée
         if (lastOfferFrom && lastWasLastOffer && lastOfferFrom !== from) {
-          // On ne met plus "annulee" ici : on repart en attente + réassignation
-          // (si tu veux garder la trace)
-          await db.query(`UPDATE rides SET cancel_reason = 'chauffeur_refuse_last_offer' WHERE id = $1`, [rideId]);
+          await db.query(
+            `UPDATE rides SET cancel_reason = 'chauffeur_refuse_last_offer' WHERE id = $1`,
+            [rideId]
+          );
         }
 
-        // Ajouter le chauffeur courant à la liste d'exclusion
+        // Exclure le chauffeur courant
         const updatedExclude = currDriver
           ? Array.from(new Set([...contacted, currDriver]))
           : contacted;
 
-        // Remettre la course en attente et libérer le chauffeur courant
+        // Remettre en attente et libérer le chauffeur
         await db.query(
           `UPDATE rides
               SET status = 'en_attente',
@@ -381,10 +380,10 @@ router.post('/:id/discussion', async (req, res) => {
           [rideId, updatedExclude]
         );
 
-        // Réassigner tout de suite
+        // Réassigner
         const r = await reassignDriverForRide(Number(rideId));
         if (!r.ok) {
-          // Enregistrer le message et répondre qu'il n'y a personne pour le moment
+          // Persister le message puis signaler qu'il n'y a personne
           await db.query(
             `UPDATE rides SET discussion = array_append(discussion, $1) WHERE id = $2`,
             [message, rideId]
@@ -394,9 +393,9 @@ router.post('/:id/discussion', async (req, res) => {
 
         // Notifier le nouveau chauffeur
         try {
-          const tokNew = await getDriverFcmTokenByPhone(r.driver.phone);
+          const tokNew = await fcm.getDriverFcmTokenByPhone(r.driver.phone);
           if (tokNew) {
-            await sendFcm(
+            await fcm.sendFcm(
               tokNew,
               { title: '🚗 Nouvelle course', body: 'Une course vous a été assignée.' },
               { type: 'new_ride', ride_id: String(rideId) }
@@ -406,43 +405,54 @@ router.post('/:id/discussion', async (req, res) => {
           console.error('Notif new driver after refuse:', e);
         }
 
-        // Enregistrer le message de refus puis répondre avec le nouveau driver
+        // Enregistrer le message puis répondre avec le nouveau driver
         await db.query(
           `UPDATE rides SET discussion = array_append(discussion, $1) WHERE id = $2`,
           [message, rideId]
         );
         return res.json({ success: true, reassign: true, driver: r.driver });
       }
+
+      // Cas "client refuse" : on garde juste la trace (ta logique existante)
+      if (lastOfferFrom && lastWasLastOffer && lastOfferFrom !== from) {
+        await db.query(
+          `UPDATE rides SET status = 'annulee', cancelled_by = $1 WHERE id = $2`,
+          [from, rideId]
+        );
+      }
     }
 
-    // ✅ Enregistrer message (cas généraux)
+    // Enregistrer le message dans tous les autres cas
     await db.query(
       `UPDATE rides SET discussion = array_append(discussion, $1) WHERE id = $2`,
       [message, rideId]
     );
 
-    // ✅ Mettre à jour le prix proposé (sauf accept/refuse)
+    // Mettre à jour le prix proposé (sauf accept/refuse)
     if (type !== 'accept' && type !== 'refuse' && amount) {
-      await db.query(`UPDATE rides SET proposed_price = $1 WHERE id = $2`, [amount, rideId]);
+      await db.query(
+        `UPDATE rides SET proposed_price = $1 WHERE id = $2`,
+        [amount, rideId]
+      );
     }
 
-    // ✅ Logique client_accepted en fonction de qui parle
+    // Logique client_accepted comme avant
     if (from === 'client' && (type === 'normal' || type === 'last_offer' || type === 'accept')) {
       await db.query(`UPDATE rides SET client_accepted = true WHERE id = $1`, [rideId]);
     }
     if (from === 'chauffeur' && (type === 'normal' || type === 'last_offer')) {
-      await db.query(`UPDATE rides SET client_accepted = false WHERE id = $1`, [rideId]);
+      await db.query(`UPDATE rides SET client_accepted = false WHERE id = $1`);
     }
 
-    // 🔔 Notifier uniquement l'AUTRE partie (ta logique existante)
+    // Notifier uniquement l'AUTRE partie (ta logique existante côté chauffeur)
     try {
       const rideIdNum = Number(rideId);
       if (from === 'client') {
         const r1 = await db.query('SELECT driver_phone FROM rides WHERE id=$1', [rideIdNum]);
         const driverPhone = r1.rows[0]?.driver_phone;
-        const token = await getDriverFcmTokenByPhone(driverPhone);
+        const token = await fcm.getDriverFcmTokenByPhone(driverPhone);
         if (token) {
-          await sendFcm(
+          await fcm.sendFcm(
             token,
             {
               title: '💬 Nouvelle proposition',
@@ -452,15 +462,15 @@ router.post('/:id/discussion', async (req, res) => {
           );
         }
       }
-      // (Plus tard: notifs côté client si tu stockes son fcm_token)
+      // (Plus tard: notif côté client si tu stockes son fcm_token)
     } catch (e) {
       console.error('Notif nego_update:', e);
     }
 
     res.json({ success: true });
   } catch (e) {
-    console.error("❌ Erreur discussion:", e);
-    res.status(500).json({ error: "Erreur serveur" });
+    console.error('❌ Erreur discussion:', e);
+    res.status(500).json({ error: 'Erreur serveur' });
   }
 });
 
@@ -564,12 +574,11 @@ const { sendFcm, getDriverFcmTokenByPhone } = require('../utils/fcm');
 
 router.post('/:id/cancel', async (req, res) => {
   const rideId = Number(req.params.id);
-  const by = String(req.body?.by || '').toLowerCase(); // 'driver' | 'client' | 'system'
+  const by = String(req.body?.by || '').toLowerCase();
 
   if (!rideId) return res.status(400).json({ error: 'INVALID_RIDE_ID' });
 
   try {
-    // Charger l'état actuel de la course
     const r0 = await db.query(
       `SELECT driver_phone, reassign_on_cancel, contacted_driver_phones
          FROM rides WHERE id = $1`,
@@ -580,12 +589,12 @@ router.post('/:id/cancel', async (req, res) => {
 
     const prevDriver = ride.driver_phone || null;
 
-    // Notifier l'ancien chauffeur que la course est annulée (comportement identique à avant)
+    // Notifier l'ancien chauffeur que la course est annulée (comportement existant)
     if (prevDriver) {
       try {
-        const tokPrev = await getDriverFcmTokenByPhone(prevDriver);
+        const tokPrev = await fcm.getDriverFcmTokenByPhone(prevDriver);
         if (tokPrev) {
-          await sendFcm(
+          await fcm.sendFcm(
             tokPrev,
             { title: '❌ Course annulée', body: 'La course a été annulée' },
             { type: 'status_update', ride_id: String(rideId) }
@@ -596,14 +605,12 @@ router.post('/:id/cancel', async (req, res) => {
       }
     }
 
-    // Si on doit réassigner automatiquement
     if (ride.reassign_on_cancel) {
-      // Ajouter l’ancien chauffeur dans la liste d’exclusion (si pas déjà)
       const updatedExclude = prevDriver
         ? Array.from(new Set([...(ride.contacted_driver_phones || []), prevDriver]))
         : (ride.contacted_driver_phones || []);
 
-      // Remettre la course "en attente" et libérer le driver
+      // Remettre la course en attente + exclure l’ancien chauffeur
       await db.query(
         `UPDATE rides
             SET status = 'en_attente',
@@ -614,18 +621,17 @@ router.post('/:id/cancel', async (req, res) => {
         [rideId, by || null, updatedExclude]
       );
 
-      // Réassigner immédiatement
+      // Réassignation immédiate
       const r = await reassignDriverForRide(rideId);
       if (!r.ok) {
-        // Personne de dispo pour l’instant
         return res.status(404).json({ error: r.reason || 'NO_DRIVER_AVAILABLE' });
       }
 
       // Notifier le nouveau chauffeur
       try {
-        const tokNew = await getDriverFcmTokenByPhone(r.driver.phone);
+        const tokNew = await fcm.getDriverFcmTokenByPhone(r.driver.phone);
         if (tokNew) {
-          await sendFcm(
+          await fcm.sendFcm(
             tokNew,
             { title: '🚗 Nouvelle course', body: 'Une course vous a été assignée.' },
             { type: 'new_ride', ride_id: String(rideId) }
@@ -638,14 +644,14 @@ router.post('/:id/cancel', async (req, res) => {
       return res.json({ ok: true, driver: r.driver });
     }
 
-    // Sinon : comportement legacy = course réellement annulée
+    // Sinon: annulation "finale" (legacy)
     await db.query(
-      `UPDATE rides SET status = 'annulee', cancel_reason = $2 WHERE id = $1`,
+      `UPDATE rides SET status='annulee', cancel_reason=$2 WHERE id=$1`,
       [rideId, by || null]
     );
     return res.json({ ok: true });
   } catch (e) {
-    console.error('cancel error:', e);
+    console.error('cancel error', e);
     return res.status(500).json({ error: 'SERVER_ERROR' });
   }
 });
@@ -963,6 +969,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
