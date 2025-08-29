@@ -568,9 +568,6 @@ router.post('/create_auto', async (req, res) => {
 });
 
 
-const db = require('../db');
-const { reassignDriverForRide } = require('../utils/reassign');
-const { sendFcm, getDriverFcmTokenByPhone } = require('../utils/fcm');
 
 router.post('/:id/cancel', async (req, res) => {
   const rideId = Number(req.params.id);
@@ -969,6 +966,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
