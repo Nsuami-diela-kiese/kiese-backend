@@ -316,10 +316,8 @@ router.post('/:id/discussion', async (req, res) => {
   const rideId = req.params.id;
   const body = req.body;
 
-  console.log('🟢 BODY REÇU :', body);
-
   if (!body || !body.from || !body.type) {
-    return res.status(400).json({ error: 'Corps invalide ou manquant', received: body });
+    return res.status(400).json({ error: "Corps invalide ou manquant", received: body });
   }
 
   const { from, amount, type } = body;
@@ -339,38 +337,42 @@ router.post('/:id/discussion', async (req, res) => {
         await db.query(`UPDATE rides SET client_accepted = true WHERE id = $1`, [rideId]);
       }
     } else if (type === 'refuse') {
-      // Lire état utile
       const r0 = await db.query(
         `SELECT last_offer_from, discussion, driver_phone, contacted_driver_phones
            FROM rides WHERE id = $1`,
         [rideId]
       );
       const row = r0.rows[0] || {};
-      const lastOfferFrom = row.last_offer_from;
+      const lastOfferFrom = row.last_offer_from;            // 'client' | 'chauffeur' | null
       const discussion = row.discussion || [];
-      const lastMsg = discussion.length > 0 ? discussion[discussion.length - 1] : '';
+      const lastMsg = discussion.length ? discussion[discussion.length - 1] : '';
       const lastWasLastOffer = lastMsg.includes(':last_offer');
       const currDriver = row.driver_phone || null;
       const contacted = row.contacted_driver_phones || [];
 
       message += ':refused';
 
-      // Si le chauffeur refuse → on réassigne immédiatement
-      if (from === 'chauffeur') {
-        // (trace) si refus d’une "dernière offre" opposée
-        if (lastOfferFrom && lastWasLastOffer && lastOfferFrom !== from) {
-          await db.query(
-            `UPDATE rides SET cancel_reason = 'chauffeur_refuse_last_offer' WHERE id = $1`,
-            [rideId]
-          );
-        }
+      // 🔴 CLIENT refuse la DERNIÈRE OFFRE du CHAUFFEUR -> annulation
+      if (from === 'client' && lastWasLastOffer && lastOfferFrom === 'chauffeur') {
+        await db.query(
+          `UPDATE rides SET status = 'annulee', cancelled_by = 'client' WHERE id = $1`,
+          [rideId]
+        );
+        await db.query(
+          `UPDATE rides SET discussion = array_append(discussion, $1) WHERE id = $2`,
+          [message, rideId]
+        );
+        return res.json({ success: true, cancelled: true });
+      }
 
-        // Exclure le chauffeur courant
+      // 🟢 CHAUFFEUR refuse (normal ou dernière offre du client) -> JAMAIS 'annulee' :
+      //    on libère et on réassigne, la course reste visible chez le client.
+      if (from === 'chauffeur') {
         const updatedExclude = currDriver
           ? Array.from(new Set([...contacted, currDriver]))
           : contacted;
 
-        // Remettre en attente et libérer le chauffeur
+        // Repartir "en attente" côté serveur (visible chez le client), libérer le chauffeur courant
         await db.query(
           `UPDATE rides
               SET status = 'en_attente',
@@ -380,18 +382,21 @@ router.post('/:id/discussion', async (req, res) => {
           [rideId, updatedExclude]
         );
 
-        // Réassigner
+        // Enregistrer le message de refus
+        await db.query(
+          `UPDATE rides SET discussion = array_append(discussion, $1) WHERE id = $2`,
+          [message, rideId]
+        );
+
+        // Réassigner immédiatement
         const r = await reassignDriverForRide(Number(rideId));
+
         if (!r.ok) {
-          // Persister le message puis signaler qu'il n'y a personne
-          await db.query(
-            `UPDATE rides SET discussion = array_append(discussion, $1) WHERE id = $2`,
-            [message, rideId]
-          );
-          return res.status(404).json({ error: r.reason || 'NO_DRIVER_AVAILABLE' });
+          // ❗ Pas de 404 : on garde 200 + flag pour que l'app reste sur l'écran de course
+          return res.json({ success: true, reassign: false, reason: r.reason || 'NO_DRIVER_AVAILABLE' });
         }
 
-        // Notifier le nouveau chauffeur
+        // (Optionnel) notifier le nouveau chauffeur
         try {
           const tokNew = await fcm.getDriverFcmTokenByPhone(r.driver.phone);
           if (tokNew) {
@@ -405,24 +410,13 @@ router.post('/:id/discussion', async (req, res) => {
           console.error('Notif new driver after refuse:', e);
         }
 
-        // Enregistrer le message puis répondre avec le nouveau driver
-        await db.query(
-          `UPDATE rides SET discussion = array_append(discussion, $1) WHERE id = $2`,
-          [message, rideId]
-        );
         return res.json({ success: true, reassign: true, driver: r.driver });
       }
 
-      // Cas "client refuse" : on garde juste la trace (ta logique existante)
-      if (lastOfferFrom && lastWasLastOffer && lastOfferFrom !== from) {
-        await db.query(
-          `UPDATE rides SET status = 'annulee', cancelled_by = $1 WHERE id = $2`,
-          [from, rideId]
-        );
-      }
+      // Sinon: refus "normal" du client -> on fait juste la trace, pas d'annulation
     }
 
-    // Enregistrer le message dans tous les autres cas
+    // Enregistrer le message pour les autres types
     await db.query(
       `UPDATE rides SET discussion = array_append(discussion, $1) WHERE id = $2`,
       [message, rideId]
@@ -430,21 +424,18 @@ router.post('/:id/discussion', async (req, res) => {
 
     // Mettre à jour le prix proposé (sauf accept/refuse)
     if (type !== 'accept' && type !== 'refuse' && amount) {
-      await db.query(
-        `UPDATE rides SET proposed_price = $1 WHERE id = $2`,
-        [amount, rideId]
-      );
+      await db.query(`UPDATE rides SET proposed_price = $1 WHERE id = $2`, [amount, rideId]);
     }
 
-    // Logique client_accepted comme avant
+    // Logique client_accepted
     if (from === 'client' && (type === 'normal' || type === 'last_offer' || type === 'accept')) {
       await db.query(`UPDATE rides SET client_accepted = true WHERE id = $1`, [rideId]);
     }
     if (from === 'chauffeur' && (type === 'normal' || type === 'last_offer')) {
-      await db.query(`UPDATE rides SET client_accepted = false WHERE id = $1`);
+      await db.query(`UPDATE rides SET client_accepted = false WHERE id = $1`, [rideId]);
     }
 
-    // Notifier uniquement l'AUTRE partie (ta logique existante côté chauffeur)
+    // Notif chauffeur si le client parle (ta logique existante)
     try {
       const rideIdNum = Number(rideId);
       if (from === 'client') {
@@ -462,7 +453,6 @@ router.post('/:id/discussion', async (req, res) => {
           );
         }
       }
-      // (Plus tard: notif côté client si tu stockes son fcm_token)
     } catch (e) {
       console.error('Notif nego_update:', e);
     }
@@ -470,7 +460,7 @@ router.post('/:id/discussion', async (req, res) => {
     res.json({ success: true });
   } catch (e) {
     console.error('❌ Erreur discussion:', e);
-    res.status(500).json({ error: 'Erreur serveur' });
+    res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
@@ -571,7 +561,7 @@ router.post('/create_auto', async (req, res) => {
 
 router.post('/:id/cancel', async (req, res) => {
   const rideId = Number(req.params.id);
-  const by = String(req.body?.by || '').toLowerCase();
+  const by = String(req.body?.by || '').toLowerCase(); // 'driver' | 'client' | 'system'
 
   if (!rideId) return res.status(400).json({ error: 'INVALID_RIDE_ID' });
 
@@ -586,14 +576,14 @@ router.post('/:id/cancel', async (req, res) => {
 
     const prevDriver = ride.driver_phone || null;
 
-    // Notifier l'ancien chauffeur que la course est annulée (comportement existant)
+    // Notifier l'ancien chauffeur que la course est annulée côté lui
     if (prevDriver) {
       try {
         const tokPrev = await fcm.getDriverFcmTokenByPhone(prevDriver);
         if (tokPrev) {
           await fcm.sendFcm(
             tokPrev,
-            { title: '❌ Course annulée', body: 'La course a été annulée' },
+            { title: '❌ Course annulée', body: 'La course a été annulée de votre côté' },
             { type: 'status_update', ride_id: String(rideId) }
           );
         }
@@ -602,12 +592,12 @@ router.post('/:id/cancel', async (req, res) => {
       }
     }
 
-    if (ride.reassign_on_cancel) {
+    // 🔵 Si le chauffeur annule -> jamais 'annulee' côté client : on libère et on réassigne
+    if (by === 'driver' || ride.reassign_on_cancel) {
       const updatedExclude = prevDriver
         ? Array.from(new Set([...(ride.contacted_driver_phones || []), prevDriver]))
         : (ride.contacted_driver_phones || []);
 
-      // Remettre la course en attente + exclure l’ancien chauffeur
       await db.query(
         `UPDATE rides
             SET status = 'en_attente',
@@ -618,10 +608,11 @@ router.post('/:id/cancel', async (req, res) => {
         [rideId, by || null, updatedExclude]
       );
 
-      // Réassignation immédiate
       const r = await reassignDriverForRide(rideId);
+
       if (!r.ok) {
-        return res.status(404).json({ error: r.reason || 'NO_DRIVER_AVAILABLE' });
+        // ❗ Pas de 404 : on garde visible chez le client, on indique juste qu'on cherche encore
+        return res.json({ ok: true, reassign: false, reason: r.reason || 'NO_DRIVER_AVAILABLE' });
       }
 
       // Notifier le nouveau chauffeur
@@ -638,20 +629,21 @@ router.post('/:id/cancel', async (req, res) => {
         console.error('Notif new driver after cancel:', e);
       }
 
-      return res.json({ ok: true, driver: r.driver });
+      return res.json({ ok: true, reassign: true, driver: r.driver });
     }
 
-    // Sinon: annulation "finale" (legacy)
+    // 🔴 Client annule explicitement -> vraie annulation
     await db.query(
       `UPDATE rides SET status='annulee', cancel_reason=$2 WHERE id=$1`,
       [rideId, by || null]
     );
-    return res.json({ ok: true });
+    return res.json({ ok: true, cancelled: true });
   } catch (e) {
     console.error('cancel error', e);
     return res.status(500).json({ error: 'SERVER_ERROR' });
   }
 });
+
 
 // ? Terminer une course
 
@@ -966,6 +958,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
