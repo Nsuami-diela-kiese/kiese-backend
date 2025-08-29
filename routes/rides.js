@@ -834,11 +834,8 @@ router.get('/:id/negociations', async (req, res) => {
 
 
 
-/**
- * POST /api/ride/:id/reassign_driver
- * Réassigne automatiquement un nouveau chauffeur.
- */
-router.post('/api/ride/:id/reassign_driver', async (req, res) => {
+// ✅ IMPORTANT : PAS de /api ni /ride ici, car server.js fait app.use('/api/ride', router)
+router.post('/:id/reassign_driver', async (req, res) => {
   const rideId = Number(req.params.id || 0);
   if (!rideId) return res.status(400).json({ error: 'INVALID_RIDE_ID' });
 
@@ -863,6 +860,7 @@ router.post('/api/ride/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
