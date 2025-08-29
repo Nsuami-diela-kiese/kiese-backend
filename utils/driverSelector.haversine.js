@@ -1,11 +1,15 @@
 // utils/driverSelector.haversine.js
-const { pool } = require('../db');
+const db = require('../db');
 
 /**
  * Retourne { phone, km } du chauffeur disponible le plus proche,
  * en excluant ceux déjà contactés (excludePhones).
  */
 async function selectNearestDriverHaversine({ originLat, originLng, excludePhones = [] }) {
+  if (originLat == null || originLng == null) {
+    return null; // garde-fou si la course n'a pas d'origine
+  }
+
   const sql = `
     WITH params AS (
       SELECT $1::float AS lat1, $2::float AS lon1
@@ -23,10 +27,10 @@ async function selectNearestDriverHaversine({ originLat, originLng, excludePhone
     ORDER BY km ASC
     LIMIT 1;
   `;
+
   const exclude = Array.isArray(excludePhones) ? excludePhones : [];
-  const { rows } = await pool.query(sql, [originLat, originLng, exclude]);
+  const { rows } = await db.query(sql, [originLat, originLng, exclude]);
   return rows[0] || null; // { phone, km }
 }
 
 module.exports = { selectNearestDriverHaversine };
-
