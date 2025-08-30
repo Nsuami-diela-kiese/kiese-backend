@@ -287,53 +287,91 @@ router.get('/:id/details', async (req, res) => {
 router.post('/:id/discussion', async (req, res) => {
   const rideId = Number(req.params.id);
   const body = req.body || {};
+
   try {
-    const from = (body.from || '').toString();            // 'client' | 'chauffeur'
-    const type = (body.type || '').toString();            // 'normal'|'last_offer'|'accept'|'refuse'
+    const from = (body.from || '').toString();          // 'client' | 'chauffeur'
+    const type = (body.type || '').toString();          // 'normal'|'last_offer'|'accept'|'refuse'
     const amountRaw = (body.amount ?? '').toString();
     const amount = /^\d+$/.test(amountRaw) ? parseInt(amountRaw, 10) : null;
 
-    if (!from || !type) return res.status(400).json({ error: 'from et type sont requis' });
+    if (!from || !type) {
+      return res.status(400).json({ error: 'from et type sont requis' });
+    }
     if ((type === 'normal' || type === 'last_offer') && (amount == null || amount < 3000)) {
       return res.status(400).json({ error: 'Montant invalide (min 3000)' });
     }
 
-    const r0 = await db.query(`SELECT id, status, driver_phone, proposed_price, discussion FROM rides WHERE id=$1`, [rideId]);
+    // charge la course
+    const r0 = await db.query(`
+      SELECT id, status, driver_phone, proposed_price, discussion
+      FROM rides WHERE id = $1
+    `, [rideId]);
     const ride = r0.rows[0];
     if (!ride) return res.status(404).json({ error: 'RIDE_NOT_FOUND' });
 
-    // consigner le message
+    // consigner le message (⚠️ CAST)
     let msg = `${from}:${amount != null ? amount : ''}`;
     if (type === 'last_offer') msg += ':last_offer';
     if (type === 'accept')     msg += ':accepted';
     if (type === 'refuse')     msg += ':refused';
 
-    await db.query(`UPDATE rides SET discussion = array_append(discussion, $1) WHERE id = $2`, [msg, rideId]);
+    await db.query(
+      `UPDATE rides SET discussion = array_append(discussion, $1::text) WHERE id = $2`,
+      [msg, rideId]
+    );
 
-    // proposed_price + last_offer_from
+    // MAJ proposed_price / last_offer_from
     if ((type === 'normal' || type === 'last_offer') && amount != null) {
-      await db.query(`UPDATE rides SET proposed_price=$1 WHERE id=$2`, [amount, rideId]);
+      await db.query(`UPDATE rides SET proposed_price = $1 WHERE id = $2`, [amount, rideId]);
     }
     if (type === 'last_offer' && amount != null) {
-      await db.query(`UPDATE rides SET last_offer_from=$1, last_offer_value=$2 WHERE id=$3`, [from, amount, rideId]);
+      await db.query(
+        `UPDATE rides SET last_offer_from = $1, last_offer_value = $2 WHERE id = $3`,
+        [from, amount, rideId]
+      );
     }
 
     // accept/refuse
     if (type === 'accept') {
       if (from === 'client') {
-        await db.query(`UPDATE rides SET client_accepted=TRUE WHERE id=$1`, [rideId]);
+        await db.query(`UPDATE rides SET client_accepted = TRUE WHERE id = $1`, [rideId]);
       } else if (from === 'chauffeur') {
-        await db.query(`UPDATE rides SET status='course_acceptee' WHERE id=$1`, [rideId]);
+        await db.query(`UPDATE rides SET status = 'course_acceptee' WHERE id = $1`, [rideId]);
       }
     }
 
     if (type === 'refuse' && from === 'chauffeur') {
-      // On déclenche la réassignation (qui gère reassigning, libération, archive, etc.)
+      // 🔁 TRIGGER réassignation (gère tout: guard, archive, reset, pick, notif)
       const rr = await reassignDriverForRide(rideId);
       console.log('[discussion] reassign result:', JSON.stringify(rr));
     }
 
-    // notif (client -> chauffeur) identique à ta version actuelle…
+    // 🔔 notif (client → chauffeur)
+    if (from === 'client') {
+      try {
+        const r1 = await db.query(`SELECT driver_phone FROM rides WHERE id = $1`, [rideId]);
+        const driverPhone = r1.rows[0]?.driver_phone;
+        if (driverPhone) {
+          const token = await getDriverFcmTokenByPhone(driverPhone);
+          if (token) {
+            await sendFcm(
+              token,
+              {
+                title:
+                  (type === 'last_offer') ? '⚠️ Dernière offre du client'
+                  : (type === 'accept')   ? '✅ Le client a accepté'
+                  : (type === 'refuse')   ? '❌ Le client a refusé'
+                                          : '💬 Nouvelle proposition',
+                body: amount != null ? `Proposition: ${amount} CDF` : 'Mise à jour de la négociation',
+              },
+              { type: 'nego_update', ride_id: String(rideId), sender: 'client' }
+            );
+          }
+        }
+      } catch (e) {
+        console.error('Notif nego_update error:', e);
+      }
+    }
 
     return res.json({ success: true });
   } catch (e) {
@@ -341,7 +379,6 @@ router.post('/:id/discussion', async (req, res) => {
     return res.status(500).json({ error: 'SERVER_ERROR' });
   }
 });
-
 
 
 
@@ -886,6 +923,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
