@@ -577,9 +577,12 @@ router.post('/create_auto', async (req, res) => {
 
 // POST /api/ride/:id/cancel
 // Body: { by: "driver" | "client" | "system" }
+// POST /api/ride/:id/cancel
+// Body: { by: "driver" | "client" | "system" }  (ou query ?by=client pour tester)
 router.post('/:id/cancel', async (req, res) => {
   const rideId = Number(req.params.id);
-  const by = String(req.body?.by || '').toLowerCase(); // 'driver' | 'client' | 'system'
+  // 👇 lit by depuis body OU query, normalise, évite les blancs & majuscules
+  const by = ((req.body?.by ?? req.query?.by ?? '').toString().trim().toLowerCase());
 
   if (!rideId) return res.status(400).json({ error: 'INVALID_RIDE_ID' });
 
@@ -594,9 +597,14 @@ router.post('/:id/cancel', async (req, res) => {
 
     const prevDriver = ride.driver_phone || null;
 
-    // 🔴 1) Client annule explicitement ⇒ annulation réelle (priorité absolue)
+    // 🔒 Valider "by" pour éviter les réassignations involontaires
+    const allowed = new Set(['client','driver','system','admin']);
+    if (!allowed.has(by)) {
+      return res.status(400).json({ error: 'MISSING_OR_INVALID_BY', hint: "by must be 'client' | 'driver' | 'system' | 'admin'" });
+    }
+
+    // 1) CLIENT annule → vraie annulation (pas de null sur driver_phone)
     if (by === 'client') {
-      // NE PAS mettre driver_phone = NULL (on garde la trace)
       await db.query(
         `UPDATE rides
            SET status='annulee',
@@ -606,7 +614,7 @@ router.post('/:id/cancel', async (req, res) => {
         [rideId]
       );
 
-      // (Optionnel) notifier le chauffeur
+      // (optionnel) notifier le chauffeur
       if (prevDriver) {
         try {
           const tokPrev = await fcm.getDriverFcmTokenByPhone(prevDriver);
@@ -617,35 +625,30 @@ router.post('/:id/cancel', async (req, res) => {
               { type: 'status_update', ride_id: String(rideId) }
             );
           }
-        } catch (e) {
-          console.error('Notif client cancel -> driver:', e);
-        }
+        } catch (e) { console.error('Notif client cancel -> driver:', e); }
       }
 
       return res.json({ ok: true, cancelled: true });
     }
 
-    // 🔵 2) Chauffeur annule OU auto-réassignation activée
+    // 2) CHAUFFEUR annule OU auto-réassignation active → réassigner (pas annuler côté client)
     if (by === 'driver' || ride.reassign_on_cancel) {
       const updatedExclude = prevDriver
         ? Array.from(new Set([...(ride.contacted_driver_phones || []), prevDriver]))
         : (ride.contacted_driver_phones || []);
 
-      // Remettre en attente, libérer le driver, nettoyer cancelled_by
       await db.query(
         `UPDATE rides
             SET status = 'en_attente',
                 driver_phone = NULL,
                 cancel_reason = $2,
-                cancelled_by = NULL,
+                cancelled_by = NULL,              -- 👈 pas une vraie annulation
                 contacted_driver_phones = $3
           WHERE id = $1`,
         [rideId, by === 'driver' ? 'driver_cancel' : 'auto_reassign', updatedExclude]
       );
 
-      // 🔄 Flag "on cherche"
       await db.query(`UPDATE rides SET reassigning = TRUE WHERE id = $1`, [rideId]);
-
       let r;
       try {
         r = await reassignDriverForRide(rideId);
@@ -654,11 +657,11 @@ router.post('/:id/cancel', async (req, res) => {
       }
 
       if (!r.ok) {
-        // Pas de 404: on garde visible chez le client
+        // pas de 404: la course reste visible chez le client
         return res.json({ ok: true, reassign: false, reason: r.reason || 'NO_DRIVER_AVAILABLE' });
       }
 
-      // Notifier le nouveau chauffeur
+      // notifier le nouveau chauffeur (optionnel)
       try {
         const tokNew = await fcm.getDriverFcmTokenByPhone(r.driver.phone);
         if (tokNew) {
@@ -668,21 +671,19 @@ router.post('/:id/cancel', async (req, res) => {
             { type: 'new_ride', ride_id: String(rideId) }
           );
         }
-      } catch (e) {
-        console.error('Notif new driver after cancel:', e);
-      }
+      } catch (e) { console.error('Notif new driver after cancel:', e); }
 
       return res.json({ ok: true, reassign: true, driver: r.driver });
     }
 
-    // 🟡 3) Cas par défaut (ex: system/admin) ⇒ annulation réelle
+    // 3) Autres cas (system/admin) → vraie annulation
     await db.query(
       `UPDATE rides
          SET status='annulee',
              cancelled_by=$2,
              cancel_reason=$2
        WHERE id=$1`,
-      [rideId, by || 'system']
+      [rideId, by]
     );
     return res.json({ ok: true, cancelled: true });
   } catch (e) {
@@ -690,6 +691,7 @@ router.post('/:id/cancel', async (req, res) => {
     return res.status(500).json({ error: 'SERVER_ERROR' });
   }
 });
+
 
 
 
@@ -1007,6 +1009,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
