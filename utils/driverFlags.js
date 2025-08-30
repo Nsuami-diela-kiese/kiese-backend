@@ -1,21 +1,14 @@
-
-// utils/driverFlags.js
 const db = require('../db');
 
-async function setBusyByPhone(phone, busy = true) {
+async function setBusyByPhone(phone, busy) {
   if (!phone) return;
-  await db.query(`
-    UPDATE drivers SET on_ride = $1
-    WHERE TRIM(phone) = TRIM($2)
-  `, [busy, phone]);
+  await db.query(
+    `UPDATE drivers
+        SET on_ride = $2,
+            available = CASE WHEN $2 THEN false ELSE available END
+      WHERE phone = $1`,
+    [phone, !!busy]
+  );
 }
 
-async function setAvailableByPhone(phone, available = true) {
-  if (!phone) return;
-  await db.query(`
-    UPDATE drivers SET available = $1
-    WHERE TRIM(phone) = TRIM($2)
-  `, [available, phone]);
-}
-
-module.exports = { setBusyByPhone, setAvailableByPhone };
+module.exports = { setBusyByPhone };
