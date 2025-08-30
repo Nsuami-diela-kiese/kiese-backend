@@ -1,5 +1,6 @@
 // utils/fcm.js
 const admin = require("firebase-admin");
+const db = require('../db'); // 👈 pour lire le token
 
 function getSvc() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -18,14 +19,22 @@ if (!admin.apps.length) {
   });
 }
 
+async function getDriverFcmTokenByPhone(phone) {
+  if (!phone) return null;
+  const r = await db.query('SELECT fcm_token FROM drivers WHERE phone = $1', [phone]);
+  return r.rows[0]?.fcm_token || null;
+}
+
 async function sendFcm(token, { title, body }, data = {}) {
   if (!token) return;
+  // FCM data doit être stringifié
+  const dataStr = Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)]));
   return admin.messaging().send({
     token,
-    notification: { title, body }, // nécessaire pour affichage quand app est en arrière-plan/tuée
-    data,
+    notification: { title, body },
+    data: dataStr,
     android: { priority: "high" },
   });
 }
 
-module.exports = { sendFcm };
+module.exports = { sendFcm, getDriverFcmTokenByPhone };
