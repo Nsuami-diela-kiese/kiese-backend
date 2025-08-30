@@ -540,75 +540,124 @@ router.post('/create_auto', async (req, res) => {
 // POST /api/ride/:id/cancel
 // Body: { by: "driver" | "client" | "system" }
 // POST /api/ride/:id/cancel
-// Body: { by: "driver" | "client" | "system" }  (ou query ?by=client pour tester)
-// routes/rides.js
+// POST /api/ride/:id/cancel
+// body: { by?: 'client' | 'chauffeur' | 'system', reason?: string }
 router.post('/:id/cancel', async (req, res) => {
   const rideId = Number(req.params.id);
-  const by = (req.body?.by || 'client'); // 'client' | 'chauffeur' | 'system'
-  const reason = req.body?.reason || null;
+  const by = String(req.body?.by || 'client').toLowerCase();
+  const reason = req.body?.reason || (by === 'client' ? 'client_cancel' : 'auto_reassign');
 
-  // chauffeur courant (à libérer si besoin)
-  const r = await db.query(`SELECT driver_phone FROM rides WHERE id=$1`, [rideId]);
-  const currentDriver = r.rows[0]?.driver_phone;
-
-  if (by === 'chauffeur') {
-    // 1) libère l'ancien chauffeur
-    await setBusyByPhone(currentDriver, false);
-
-    // 2) flag "recherche en cours"
-    await db.query(`
-      UPDATE rides
-         SET reassigning = TRUE,
-             cancel_reason = $1,
-             cancelled_by = $2
-       WHERE id = $3
-    `, [reason || 'driver_cancel', 'chauffeur', rideId]);
-
-    // 3) tente la réassignation
-    const rr = await reassignDriverForRide(rideId);
-
-    // 4) fin de phase reassigning
-    await db.query(`UPDATE rides SET reassigning = FALSE WHERE id = $1`, [rideId]);
-
-    if (!rr.ok) {
-      // pas de chauffeur trouvé → on annule côté serveur
-      await db.query(`UPDATE rides SET status = 'annulee' WHERE id = $1`, [rideId]);
-      return res.status(409).json({ error: 'NO_DRIVER_AVAILABLE' });
-    }
-
-    // (optionnel) notifier le nouveau chauffeur ici via FCM
-
-    return res.json({ ok: true, driver: rr.driver });
-  }
-
-  // --- Annulation côté client ---
-  await db.query(`
-    UPDATE rides
-       SET status = 'annulee',
-           cancel_reason = $1,
-           cancelled_by = $2
-     WHERE id = $3
-  `, [reason || 'client_cancel', 'client', rideId]);
-
-  // libère le chauffeur
-  await setBusyByPhone(currentDriver, false);
-
-  // (optionnel) notifier le chauffeur
   try {
-    const token = await getDriverFcmTokenByPhone(currentDriver);
-    if (token) {
-      await sendFcm(
-        token,
-        { title: '❌ Course annulée', body: 'La course a été annulée par le client' },
-        { type: 'status_update', ride_id: String(rideId) }
-      );
-    }
-  } catch (e) {
-    console.error('Notif cancel:', e);
-  }
+    // 1) Charger la course
+    const r0 = await db.query(
+      `SELECT id, status, driver_phone
+         FROM rides
+        WHERE id = $1`,
+      [rideId]
+    );
+    const ride = r0.rows[0];
+    if (!ride) return res.status(404).json({ error: 'RIDE_NOT_FOUND' });
 
-  return res.json({ success: true });
+    const oldPhone = ride.driver_phone || null;
+
+    // 2) Branche "client"
+    if (by === 'client') {
+      // Idempotence: si déjà annulée/terminée on répond 200
+      if (ride.status === 'annulee' || ride.status === 'terminee') {
+        return res.json({ ok: true, status: ride.status });
+      }
+
+      await db.query('BEGIN');
+      await db.query(
+        `UPDATE rides
+            SET status = 'annulee',
+                cancelled_by = 'client',
+                cancel_reason = $2,
+                reassigning = FALSE,
+                discussion = COALESCE(discussion, ARRAY[]::text[]) || 'client:0:cancelled'::text
+          WHERE id = $1`,
+        [rideId, reason]
+      );
+      await db.query('COMMIT');
+
+      // Notifier le chauffeur + libérer son flag d'occupation (best-effort)
+      if (oldPhone) {
+        try {
+          const token = await getDriverFcmTokenByPhone(oldPhone);
+          if (token) {
+            await sendFcm(
+              token,
+              { title: '❌ Course annulée', body: 'Le client a annulé la course.' },
+              { type: 'status_update', ride_id: String(rideId) }
+            );
+          }
+        } catch (e) {
+          console.error('FCM cancel->driver error:', e);
+        }
+        try { if (setBusyByPhone) await setBusyByPhone(oldPhone, false); } catch (_) {}
+      }
+
+      return res.json({ ok: true, status: 'annulee' });
+    }
+
+    // 3) Branche "chauffeur" -> on lance une RÉASSIGNATION
+    if (by === 'chauffeur') {
+      await db.query('BEGIN');
+      await db.query(
+        `UPDATE rides
+            SET cancelled_by = 'chauffeur',
+                cancel_reason = $2,
+                status = 'en_attente',
+                driver_phone = NULL,
+                reassigning = TRUE
+          WHERE id = $1`,
+        [rideId, reason]
+      );
+      await db.query('COMMIT');
+
+      // libérer l'ancien chauffeur côté flags (best-effort)
+      try { if (oldPhone && setBusyByPhone) await setBusyByPhone(oldPhone, false); } catch (_) {}
+
+      // réassignation
+      const r = await reassignDriverForRide(rideId).catch(e => {
+        console.error('reassign error:', e);
+        return { ok: false, reason: 'TX_ERROR' };
+      });
+
+      // Fin de phase "reassigning"
+      try {
+        await db.query(`UPDATE rides SET reassigning = FALSE WHERE id = $1`, [rideId]);
+      } catch (_) {}
+
+      if (r?.ok) {
+        return res.json({ ok: true, status: 'en_attente', reassigned_to: r.driver.phone });
+      } else {
+        // On reste en attente sans chauffeur; le client verra "recherche…"
+        return res.status(202).json({ ok: false, status: 'en_attente', searching: true, reason: r?.reason || 'NO_DRIVER' });
+      }
+    }
+
+    // 4) Fallback "system" (si jamais tu l’utilises)
+    await db.query(
+      `UPDATE rides
+          SET status = 'annulee',
+              cancelled_by = 'system',
+              cancel_reason = $2,
+              reassigning = FALSE
+        WHERE id = $1`,
+      [rideId, reason]
+    );
+    return res.json({ ok: true, status: 'annulee' });
+
+  } catch (e) {
+    // Si jamais un BEGIN a été fait plus haut sans COMMIT:
+    try { await db.query('ROLLBACK'); } catch (_) {}
+    console.error('cancel route error:', e);
+    return res.status(500).json({ error: 'SERVER_ERROR' });
+  }
 });
+
+module.exports = router;
 
 
 
@@ -928,6 +977,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
