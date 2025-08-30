@@ -1,11 +1,9 @@
 // utils/reassign.js
 const db = require('../db');
 const { pickNearestDriverAtomicFallback } = require('./driverPicker');
-let setBusyByPhone;
-try { ({ setBusyByPhone } = require('./driverFlags')); } catch (_) {}
+let setBusyByPhone; try { ({ setBusyByPhone } = require('./driverFlags')); } catch (_) {}
 const { sendFcm } = require('../utils/fcm');
 
-// Récupère le dernier montant proposé par le client (fallback 3000)
 function getLastClientOffer(discussion, fallback) {
   let last = (fallback ?? 3000);
   if (Array.isArray(discussion)) {
@@ -27,17 +25,17 @@ async function getDriverFcmTokenByPhone(phone) {
 }
 
 async function reassignDriverForRide(rideId) {
-  // Sécurise l’UI côté client
-  await db.query('UPDATE rides SET reassigning = TRUE WHERE id=$1', [rideId]).catch(()=>{});
+  // signal visuel côté client
+  await db.query('UPDATE rides SET reassigning = TRUE WHERE id=$1', [rideId]).catch(() => {});
 
-  // Charge la course
+  // charge la course
   const r0 = await db.query(`
     SELECT id, origin_lat, origin_lng, driver_phone,
            discussion, proposed_price,
            contacted_driver_phones,
            reassign_attempts, max_reassign_attempts
-    FROM rides
-    WHERE id = $1
+      FROM rides
+     WHERE id = $1::int
   `, [rideId]);
   const ride = r0.rows[0];
   if (!ride) {
@@ -56,11 +54,15 @@ async function reassignDriverForRide(rideId) {
   }
 
   const oldPhone = ride.driver_phone || null;
-  const exclude = Array.isArray(ride.contacted_driver_phones)
-    ? [...ride.contacted_driver_phones]
-    : [];
+
+  // libère l’ancien (best-effort)
+  try { if (oldPhone && setBusyByPhone) await setBusyByPhone(oldPhone, false); } catch (_) {}
+
+  // exclure déjà contactés + ancien
+  const exclude = Array.isArray(ride.contacted_driver_phones) ? [...ride.contacted_driver_phones] : [];
   if (oldPhone) exclude.push(oldPhone);
 
+  // sélection nouveau chauffeur (multi-rayons + minSolde)
   const minSolde = Math.max(ride.proposed_price ?? 0, 3000);
   const driver = await pickNearestDriverAtomicFallback({
     originLat: ride.origin_lat,
@@ -70,72 +72,75 @@ async function reassignDriverForRide(rideId) {
     minSolde
   });
 
-  // Compte la tentative (qu’elle réussisse ou pas)
+  // compte une tentative, quoi qu’il arrive
   await db.query(
-    `UPDATE rides SET reassign_attempts = COALESCE(reassign_attempts,0)+1 WHERE id=$1`,
+    `UPDATE rides SET reassign_attempts = COALESCE(reassign_attempts,0)+1 WHERE id=$1::int`,
     [rideId]
   );
 
   if (!driver) {
+    // rien trouvé: laisser sans chauffeur mais en attente, et retirer le flag
     await db.query(`
       UPDATE rides
          SET driver_phone = NULL,
              status = 'en_attente',
              reassigning = FALSE
-       WHERE id = $1
+       WHERE id = $1::int
     `, [rideId]);
     return { ok:false, reason:'NO_DRIVER_AVAILABLE' };
   }
 
+  // message de redémarrage de négo
   const lastClientAmount = getLastClientOffer(ride.discussion, ride.proposed_price);
   const newDiscussionFirstMsg = `client:${lastClientAmount}`;
+
+  // construire l’objet d’archive côté Node → $2::jsonb (évite tout 42P18)
+  const archiveEntry = {
+    driver_phone: oldPhone ?? null,
+    messages: Array.isArray(ride.discussion) ? ride.discussion : [],
+    ended_at: new Date().toISOString(),
+  };
 
   try {
     await db.query('BEGIN');
 
-    // Archive l’ancienne discussion (COALESCE impératif)
+    // archiver l’historique si utile
     if ((ride.discussion?.length ?? 0) > 0 || oldPhone) {
       await db.query(`
         UPDATE rides
            SET archived_discussions = COALESCE(archived_discussions, '[]'::jsonb)
-               || jsonb_build_array(
-                    jsonb_build_object(
-                      'driver_phone', $2,
-                      'messages', to_jsonb(COALESCE(discussion, ARRAY[]::text[])),
-                      'ended_at', now()
-                    )
-                  )
-         WHERE id = $1
-      `, [rideId, oldPhone]);
+                                       || ($2::jsonb)
+         WHERE id = $1::int
+      `, [rideId, JSON.stringify([archiveEntry])]); // jsonb array
     }
 
-    // 👉👉 CAST explicite pour $2 : ARRAY[$2]::text[]
+    // assigner le nouveau + réinitialiser la négo
     await db.query(`
       UPDATE rides
-         SET driver_phone = $1,
+         SET driver_phone = $1::text,
              status = 'en_attente',
              contacted_driver_phones = (
                SELECT ARRAY(
                  SELECT DISTINCT e
-                 FROM unnest(
-                        COALESCE(contacted_driver_phones,'{}'::text[])
-                        || ARRAY[$2]::text[]
-                      ) AS e
+                   FROM unnest(
+                          COALESCE(contacted_driver_phones, '{}'::text[])
+                          || ARRAY[ ($2)::text ]
+                        ) AS e
                )
              ),
-             discussion = ARRAY[$3]::text[],
-             proposed_price = $4,
+             discussion = ARRAY[ ($3)::text ],
+             proposed_price = $4::int,
              last_offer_from = NULL,
              client_accepted = TRUE,
              negotiation_status = 'en_attente',
              reassigning = FALSE
-       WHERE id = $5
+       WHERE id = $5::int
     `, [
-      driver.phone,                 // $1
-      driver.phone,                 // $2 (string) → ARRAY[$2]::text[]
-      newDiscussionFirstMsg,        // $3
-      lastClientAmount,             // $4
-      rideId                        // $5
+      driver.phone,            // $1
+      driver.phone,            // $2 (string dans ARRAY[...])
+      newDiscussionFirstMsg,   // $3
+      lastClientAmount,        // $4
+      rideId                   // $5
     ]);
 
     await db.query('COMMIT');
@@ -146,10 +151,10 @@ async function reassignDriverForRide(rideId) {
     return { ok:false, reason:'TX_ERROR' };
   }
 
-  // Réserver le nouveau chauffeur (best-effort)
+  // marquer occupé (optionnel)
   try { if (setBusyByPhone) await setBusyByPhone(driver.phone, true); } catch (_) {}
 
-  // Notifier le nouveau chauffeur (best-effort)
+  // notifier le nouveau chauffeur (best-effort)
   try {
     const token = await getDriverFcmTokenByPhone(driver.phone);
     if (token) {
