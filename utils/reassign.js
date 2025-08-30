@@ -1,7 +1,7 @@
 // utils/reassign.js
 const db = require('../db');
 const { pickNearestDriverAtomicFallback } = require('./driverPicker');
-const { setOnRideByPhone } = require('./driverFlags');  // set on_ride = true/false
+const { setOnRideByPhone } = require('./driverFlags'); // doit exister: UPDATE drivers SET on_ride=$2 WHERE phone=$1
 const { sendFcm } = require('../utils/fcm');
 
 async function getDriverFcmTokenByPhone(phone) {
@@ -10,7 +10,8 @@ async function getDriverFcmTokenByPhone(phone) {
   return r.rows[0]?.fcm_token || null;
 }
 
-function extractLastClientAmount(discussion, proposed) {
+// récupère la dernière offre du client, sinon proposed/min3000
+function lastClientAmount(discussion, proposed) {
   if (Array.isArray(discussion)) {
     for (let i = discussion.length - 1; i >= 0; i--) {
       const parts = (discussion[i] || '').split(':');
@@ -25,7 +26,7 @@ function extractLastClientAmount(discussion, proposed) {
 async function reassignDriverForRide(rideId) {
   console.log('[reassign] start ride=%s', rideId);
 
-  // guard (single-flight)
+  // single-flight guard
   const guard = await db.query(`
     UPDATE rides
        SET reassigning = TRUE
@@ -33,9 +34,7 @@ async function reassignDriverForRide(rideId) {
        AND COALESCE(reassigning, FALSE) = FALSE
      RETURNING 1
   `, [rideId]);
-  if (guard.rowCount === 0) {
-    return { ok: false, reason: 'BUSY' };
-  }
+  if (guard.rowCount === 0) return { ok:false, reason:'BUSY' };
 
   try {
     const r0 = await db.query(`
@@ -53,57 +52,55 @@ async function reassignDriverForRide(rideId) {
     if ((ride.reassign_attempts ?? 0) >= max) return { ok:false, reason:'MAX_ATTEMPTS_REACHED' };
 
     const oldPhone = ride.driver_phone || null;
-    const lastClientAmount = extractLastClientAmount(ride.discussion, ride.proposed_price);
+    const seedAmount = lastClientAmount(ride.discussion, ride.proposed_price);
 
     // ++ tentative
     await db.query(
-      `UPDATE rides SET reassign_attempts = COALESCE(reassign_attempts,0) + 1 WHERE id = $1`,
+      `UPDATE rides SET reassign_attempts = COALESCE(reassign_attempts,0)+1 WHERE id=$1`,
       [rideId]
     );
 
-    // libère ancien chauffeur (only on_ride)
+    // libère ancien chauffeur (on_ride=false)
     if (oldPhone) {
       try { await setOnRideByPhone(oldPhone, false); } catch (_) {}
     }
 
-    const exclude = Array.isArray(ride.contacted_driver_phones)
-      ? [...ride.contacted_driver_phones] : [];
+    // exclus
+    const exclude = Array.isArray(ride.contacted_driver_phones) ? [...ride.contacted_driver_phones] : [];
     if (oldPhone) exclude.push(oldPhone);
 
-    const minSolde = Math.max(lastClientAmount, 3000);
+    // pick
     const driver = await pickNearestDriverAtomicFallback({
       originLat: ride.origin_lat,
       originLng: ride.origin_lng,
       excludePhones: [...new Set(exclude)],
       radii: [3, 6, 10, 15],
-      minSolde
+      minSolde: Math.max(seedAmount, 3000),
     });
 
-    // TX : archive + reset + assign (avec casts explicites)
+    const sysMsg  = 'system:driver_refused';
+    const seedMsg = `client:${seedAmount}`;
+
+    // === TX: archive + reset + assign ===
     try {
       await db.query('BEGIN');
 
-      // 1) archive discussion courante
-      if ((ride.discussion && ride.discussion.length > 0) || oldPhone) {
-        await db.query(`
-          UPDATE rides
-             SET archived_discussion = archived_discussion
-                  || jsonb_build_array(
-                       jsonb_build_object(
-                         'driver_phone', $2::text,
-                         'messages', to_jsonb(COALESCE(discussion, ARRAY[]::text[])),
-                         'ended_at', now()
-                       )
+      // 1) archive discussion courante — ❗️pas de $2, on lit driver_phone depuis la ligne
+      await db.query(`
+        UPDATE rides
+           SET archived_discussion = COALESCE(archived_discussion, '[]'::jsonb)
+                || jsonb_build_array(
+                     jsonb_build_object(
+                       'driver_phone', driver_phone::text,
+                       'messages', to_jsonb(COALESCE(discussion, ARRAY[]::text[])),
+                       'ended_at', now()
                      )
-           WHERE id = $1
-        `, [rideId, oldPhone]);
-      }
-
-      const sysMsg  = 'system:driver_refused';
-      const seedMsg = `client:${lastClientAmount}`;
+                   )
+         WHERE id = $1
+      `, [rideId]);
 
       if (!driver) {
-        // pas de chauffeur → on sème la négo et on reste en attente
+        // aucun chauffeur → on remet en attente, on sème la négo
         await db.query(`
           UPDATE rides
              SET driver_phone = NULL,
@@ -120,7 +117,7 @@ async function reassignDriverForRide(rideId) {
         return { ok:false, reason:'NO_DRIVER_AVAILABLE' };
       }
 
-      // chauffeur trouvé → assign + union contacted_driver_phones (casts)
+      // chauffeur trouvé → assign + union contacted_driver_phones (casts explicites)
       await db.query(`
         UPDATE rides
            SET driver_phone = $1,
@@ -139,7 +136,7 @@ async function reassignDriverForRide(rideId) {
                client_accepted = TRUE,
                negotiation_status = 'en_attente'
          WHERE id = $5
-      `, [driver.phone, sysMsg, seedMsg, lastClientAmount, rideId]);
+      `, [driver.phone, sysMsg, seedMsg, seedAmount, rideId]);
 
       await db.query('COMMIT');
     } catch (e) {
@@ -148,10 +145,10 @@ async function reassignDriverForRide(rideId) {
       return { ok:false, reason:'TX_ERROR' };
     }
 
-    // sécurité : marque le nouveau on_ride = true
+    // marque le nouveau chauffeur on_ride=true
     try { await setOnRideByPhone(driver.phone, true); } catch (_) {}
 
-    // notif nouveau chauffeur
+    // Notif FCM
     try {
       const token = await getDriverFcmTokenByPhone(driver.phone);
       if (token) {
