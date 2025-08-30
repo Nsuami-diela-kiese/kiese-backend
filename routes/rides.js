@@ -3,13 +3,13 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const axios = require('axios');
-const { sendFcm } = require('../utils/fcm'); // 🔔 FCM Admin
-const { reassignDriverForRide } = require('../utils/reassign');
-const { setBusyByPhone } = require('../utils/driverFlags');       
-const { pickNearestDriverAtomic } = require('../utils/driverPicker');
 const { sendFcm, getDriverFcmTokenByPhone } = require('../utils/fcm');
-let setBusyByPhone;
-try { ({ setBusyByPhone } = require('../utils/driverFlags')); } catch (_) {}
+const { reassignDriverForRide } = require('../utils/reassign');
+let setBusyByPhone = null;
+try {
+  ({ setBusyByPhone } = require('../utils/driverFlags'));
+} catch (_) {
+}
 
 // petit helper pour récupérer le token FCM du chauffeur
 async function getDriverFcmTokenByPhone(phone) {
@@ -977,6 +977,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
