@@ -11,16 +11,6 @@ try {
 } catch (_) {
 }
 
-// petit helper pour récupérer le token FCM du chauffeur
-async function getDriverFcmTokenByPhone(phone) {
-  if (!phone) return null;
-  const r = await db.query('SELECT fcm_token FROM drivers WHERE phone=$1', [phone]);
-  return r.rows[0]?.fcm_token || null;
-}
-
-router.get('/__ping', (req, res) => {
-  res.json({ ok: true, at: new Date().toISOString() });
-});
 
 // 🛺 Crée une course
 router.post('/create', async (req, res) => {
@@ -977,6 +967,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
