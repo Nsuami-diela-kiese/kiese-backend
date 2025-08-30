@@ -1,11 +1,11 @@
 // utils/reassign.js
 const db = require('../db');
-const { pickNearestDriverAtomicFallback } = require('./driverPicker'); // multi-rayons
+const { pickNearestDriverAtomicFallback } = require('./driverPicker');
 let setBusyByPhone;
 try { ({ setBusyByPhone } = require('./driverFlags')); } catch (_) {}
 const { sendFcm } = require('../utils/fcm');
 
-// Dernier montant proposé par le client (sinon fallback)
+// Récupère le dernier montant proposé par le client (fallback 3000)
 function getLastClientOffer(discussion, fallback) {
   let last = (fallback ?? 3000);
   if (Array.isArray(discussion)) {
@@ -27,10 +27,10 @@ async function getDriverFcmTokenByPhone(phone) {
 }
 
 async function reassignDriverForRide(rideId) {
-  // on marque en recherche (au cas où l'appelant ne l’a pas fait)
+  // Sécurise l’UI côté client
   await db.query('UPDATE rides SET reassigning = TRUE WHERE id=$1', [rideId]).catch(()=>{});
 
-  // charge la course
+  // Charge la course
   const r0 = await db.query(`
     SELECT id, origin_lat, origin_lng, driver_phone,
            discussion, proposed_price,
@@ -70,14 +70,13 @@ async function reassignDriverForRide(rideId) {
     minSolde
   });
 
-  // on compte la tentative quoi qu’il arrive
+  // Compte la tentative (qu’elle réussisse ou pas)
   await db.query(
     `UPDATE rides SET reassign_attempts = COALESCE(reassign_attempts,0)+1 WHERE id=$1`,
     [rideId]
   );
 
   if (!driver) {
-    // pas de dispo : on reste en attente, sans chauffeur
     await db.query(`
       UPDATE rides
          SET driver_phone = NULL,
@@ -88,12 +87,13 @@ async function reassignDriverForRide(rideId) {
     return { ok:false, reason:'NO_DRIVER_AVAILABLE' };
   }
 
-  const newFirstMsg = `client:${getLastClientOffer(ride.discussion, ride.proposed_price)}`;
+  const lastClientAmount = getLastClientOffer(ride.discussion, ride.proposed_price);
+  const newDiscussionFirstMsg = `client:${lastClientAmount}`;
 
   try {
     await db.query('BEGIN');
 
-    // Archive proprement (⚠️ COALESCE indispensable)
+    // Archive l’ancienne discussion (COALESCE impératif)
     if ((ride.discussion?.length ?? 0) > 0 || oldPhone) {
       await db.query(`
         UPDATE rides
@@ -109,7 +109,7 @@ async function reassignDriverForRide(rideId) {
       `, [rideId, oldPhone]);
     }
 
-    // Assigne le nouveau + reset négo
+    // 👉👉 CAST explicite pour $2 : ARRAY[$2]::text[]
     await db.query(`
       UPDATE rides
          SET driver_phone = $1,
@@ -117,7 +117,10 @@ async function reassignDriverForRide(rideId) {
              contacted_driver_phones = (
                SELECT ARRAY(
                  SELECT DISTINCT e
-                 FROM unnest(COALESCE(contacted_driver_phones,'{}'::text[]) || $2::text[]) AS e
+                 FROM unnest(
+                        COALESCE(contacted_driver_phones,'{}'::text[])
+                        || ARRAY[$2]::text[]
+                      ) AS e
                )
              ),
              discussion = ARRAY[$3]::text[],
@@ -127,7 +130,13 @@ async function reassignDriverForRide(rideId) {
              negotiation_status = 'en_attente',
              reassigning = FALSE
        WHERE id = $5
-    `, [driver.phone, [driver.phone], newFirstMsg, getLastClientOffer(ride.discussion, ride.proposed_price), rideId]);
+    `, [
+      driver.phone,                 // $1
+      driver.phone,                 // $2 (string) → ARRAY[$2]::text[]
+      newDiscussionFirstMsg,        // $3
+      lastClientAmount,             // $4
+      rideId                        // $5
+    ]);
 
     await db.query('COMMIT');
   } catch (e) {
@@ -137,10 +146,10 @@ async function reassignDriverForRide(rideId) {
     return { ok:false, reason:'TX_ERROR' };
   }
 
-  // réserver le chauffeur (si tu gères on_ride/available)
+  // Réserver le nouveau chauffeur (best-effort)
   try { if (setBusyByPhone) await setBusyByPhone(driver.phone, true); } catch (_) {}
 
-  // Notif au nouveau chauffeur (best-effort)
+  // Notifier le nouveau chauffeur (best-effort)
   try {
     const token = await getDriverFcmTokenByPhone(driver.phone);
     if (token) {
