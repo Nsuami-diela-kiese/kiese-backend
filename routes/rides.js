@@ -3,14 +3,19 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const axios = require('axios');
-const { sendFcm, getDriverFcmTokenByPhone } = require('../utils/fcm');
 const { reassignDriverForRide } = require('../utils/reassign');
 let setBusyByPhone = null;
 try {
   ({ setBusyByPhone } = require('../utils/driverFlags'));
 } catch (_) {
 }
+const { sendFcm } = require('../utils/fcm');
 
+async function getDriverFcmTokenByPhone(phone) {
+  if (!phone) return null;
+  const r = await db.query('SELECT fcm_token FROM drivers WHERE phone = $1', [phone]);
+  return r.rows[0]?.fcm_token || null;
+}
 
 // 🛺 Crée une course
 router.post('/create', async (req, res) => {
@@ -310,10 +315,11 @@ router.post('/:id/discussion', async (req, res) => {
       return res.status(400).json({ error: 'Montant invalide (min 3000) pour ce type' });
     }
 
-    // -------- charge la course --------
+    // -------- charge la course (on lit driver_phone ici) --------
     const r0 = await db.query(`
       SELECT id, status, driver_phone, proposed_price,
-             discussion, last_offer_from, last_offer_value
+             discussion, last_offer_from, last_offer_value,
+             contacted_driver_phones
       FROM rides WHERE id = $1
     `, [rideId]);
     const ride = r0.rows[0];
@@ -347,46 +353,79 @@ router.post('/:id/discussion', async (req, res) => {
     // -------- gestion accept/refuse --------
     if (type === 'accept') {
       if (from === 'client') {
-        // le client accepte un montant → on garde en attente de l’accept chauffeur
         await db.query(`UPDATE rides SET client_accepted=true WHERE id=$1`, [rideId]);
       } else if (from === 'chauffeur') {
-        // le chauffeur accepte → course lancée
         await db.query(`UPDATE rides SET status='course_acceptee' WHERE id=$1`, [rideId]);
       }
     }
 
     if (type === 'refuse') {
       if (from === 'chauffeur') {
-        // ✅ REFUS CHAUFFEUR ⇒ on libère, on enlève le chauffeur de la course, on réassigne
+        // ✅ REFUS CHAUFFEUR ⇒ on log, on ajoute l'ancien phone aux exclus,
+        // on met reassigning=TRUE, on libère l'ancien, puis on lance la réassignation
         const oldPhone = ride.driver_phone || null;
 
-        await db.query(`
-          UPDATE rides
-             SET driver_phone = NULL,
-                 status = 'en_attente',
-                 cancelled_by = 'chauffeur',
-                 cancel_reason = 'driver_refused',
-                 reassigning = TRUE
-           WHERE id = $1
-        `, [rideId]);
+        try {
+          await db.query('BEGIN');
 
-        if (oldPhone) {
-          try { await setBusyByPhone(oldPhone, false); } catch (_) {}
+          // pousser l'ancien dans contacted_driver_phones (distinct)
+          if (oldPhone) {
+            await db.query(
+              `UPDATE rides
+                 SET contacted_driver_phones = (
+                       SELECT ARRAY(
+                         SELECT DISTINCT x
+                         FROM unnest(
+                           COALESCE(contacted_driver_phones, '{}'::text[]) || $2::text[]
+                         ) t(x)
+                       )
+                     )
+               WHERE id = $1`,
+              [rideId, [oldPhone]]
+            );
+          }
+
+          // marquer recherche + clear driver (le client verra "recherche...")
+          await db.query(
+            `UPDATE rides
+                SET driver_phone = NULL,
+                    status = 'en_attente',
+                    cancelled_by = 'chauffeur',
+                    cancel_reason = 'driver_refused',
+                    client_accepted = FALSE,
+                    reassigning = TRUE
+              WHERE id = $1`,
+            [rideId]
+          );
+
+          await db.query('COMMIT');
+        } catch (e) {
+          await db.query('ROLLBACK');
+          console.error('refuse tx error:', e);
+          return res.status(500).json({ error: 'REFUSE_TX_ERROR' });
         }
 
+        // rendre l'ancien dispo (best-effort)
+        if (oldPhone) {
+          try { await setBusyByPhone(oldPhone, false); } catch (_) {}
+          try { await db.query(`UPDATE drivers SET available = TRUE WHERE phone = $1`, [oldPhone]); } catch (_) {}
+        }
+
+        // lancer la réassignation (hors transaction), puis couper le flag
         try {
           await reassignDriverForRide(rideId);
+        } catch (e) {
+          console.error('reassign error:', e);
         } finally {
           await db.query(`UPDATE rides SET reassigning = FALSE WHERE id=$1`, [rideId]);
         }
       } else if (from === 'client') {
-        // Refus client d'une proposition : on ne cancel PAS la course.
-        // On continue la nego (status reste en_attente).
+        // Refus client : on continue la négo (status en_attente)
         await db.query(`UPDATE rides SET client_accepted=false WHERE id=$1`, [rideId]);
       }
     }
 
-    // -------- logique d’UX nego (client écrit → notifier chauffeur) --------
+    // -------- notifier chauffeur si le message vient du client --------
     if (from === 'client') {
       try {
         const r1 = await db.query(`SELECT driver_phone FROM rides WHERE id=$1`, [rideId]);
@@ -967,6 +1006,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
