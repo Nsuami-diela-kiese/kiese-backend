@@ -241,50 +241,41 @@ router.post('/:id/start', async (req, res) => {
 });
 // ?? Donne les coordonn�es client + destination pour une course
 router.get('/:id/details', async (req, res) => {
-  const id = Number(req.params.id);
-  try {
-    const r = await db.query(`
-      SELECT
-        r.id, r.status, r.reassigning, r.proposed_price,
-        r.origin_lat, r.origin_lng, r.destination_lat, r.destination_lng,
-        r.driver_phone,
-        jsonb_build_object(
-          'phone', d.phone,
-          'name', d.name,
-          'lat', d.lat,
-          'lng', d.lng,
-          'photo', d.photo,
-          'marque', d.marque,
-          'modele', d.modele,
-          'couleur', d.couleur,
-          'plaque', d.plaque
-        ) AS driver
-      FROM rides r
-      LEFT JOIN drivers d ON d.phone = r.driver_phone   -- ✨ pas de filtre sur d.available
-      WHERE r.id = $1
-    `, [id]);
+  const rideId = Number(req.params.id);
+  const r = await db.query(`
+    SELECT id, status, reassigning,
+           origin_lat, origin_lng, destination_lat, destination_lng,
+           proposed_price, driver_phone
+      FROM rides WHERE id=$1
+  `, [rideId]);
 
-    if (!r.rows[0]) return res.status(404).json({ error: 'RIDE_NOT_FOUND' });
+  const ride = r.rows[0];
+  if (!ride) return res.status(404).json({ error: 'RIDE_NOT_FOUND' });
 
-    const row = r.rows[0];
-    // tu peux aussi renvoyer driver_summary si tu en as besoin, mais garde driver intact
-    return res.json({
-      id: row.id,
-      status: row.status,
-      reassigning: row.reassigning,
-      proposed_price: row.proposed_price,
-      origin_lat: row.origin_lat,
-      origin_lng: row.origin_lng,
-      destination_lat: row.destination_lat,
-      destination_lng: row.destination_lng,
-      driver: row.driver,          // 👈 l’app lit ça
-      driver_summary: row.driver,  // compat si nécessaire
-    });
-  } catch (e) {
-    console.error('details error:', e);
-    res.status(500).json({ error: 'SERVER_ERROR' });
+  let driver = null;
+  if (ride.driver_phone) {
+    const d = await db.query(
+      `SELECT phone, name, lat, lng, marque, modele, couleur, plaque, photo
+         FROM drivers WHERE phone = $1`,
+      [ride.driver_phone]
+    );
+    driver = d.rows[0] || null;
   }
+
+  res.json({
+    id: ride.id,
+    status: ride.status,
+    reassigning: ride.reassigning === true,
+    origin_lat: ride.origin_lat,
+    origin_lng: ride.origin_lng,
+    destination_lat: ride.destination_lat,
+    destination_lng: ride.destination_lng,
+    proposed_price: ride.proposed_price,
+    driver,                // NULL si aucun => Flutter affiche la bannière
+    driver_summary: driver // compat
+  });
 });
+
 
 
 
@@ -353,11 +344,12 @@ router.post('/:id/discussion', async (req, res) => {
       }
     }
 
-    if (type === 'refuse') {
+if (type === 'refuse') {
   if (from === 'chauffeur') {
+    console.log(`[discussion] chauffeur REFUSE ride=${rideId} old=${ride.driver_phone}`);
+
     const oldPhone = ride.driver_phone || null;
 
-    // passe en recherche immédiatement côté client
     await db.query(`
       UPDATE rides
          SET driver_phone = NULL,
@@ -368,19 +360,18 @@ router.post('/:id/discussion', async (req, res) => {
        WHERE id = $1
     `, [rideId]);
 
-    // libérer l’ancien (best-effort)
-    try { if (oldPhone && setBusyByPhone) await setBusyByPhone(oldPhone, false); } catch (_) {}
+    if (oldPhone) {
+      try { await setBusyByPhone(oldPhone, false); console.log(`[discussion] freed ${oldPhone}`); } catch (_) {}
+    }
 
-    // lancer la réassignation (qui remettra discussion = ['client:<dernier>'])
     try {
-      await reassignDriverForRide(rideId);
+      const r = await reassignDriverForRide(rideId);
+      console.log(`[discussion] reassign result ride=${rideId}`, r);
     } finally {
-      // ce flag sera déjà remis à FALSE dans reassign, mais on sécurise
       await db.query(`UPDATE rides SET reassigning = FALSE WHERE id=$1`, [rideId]);
     }
   } else if (from === 'client') {
-    // refus client : on continue la négo (ne pas annuler la course)
-    await db.query(`UPDATE rides SET client_accepted = false WHERE id = $1`, [rideId]);
+    await db.query(`UPDATE rides SET client_accepted=false WHERE id=$1`, [rideId]);
   }
 }
 
@@ -966,6 +957,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
