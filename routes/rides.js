@@ -5,6 +5,7 @@ const db = require('../db');
 const axios = require('axios');
 const { sendFcm } = require('../utils/fcm'); // 🔔 FCM Admin
 const { reassignDriverForRide } = require('../utils/reassign');
+const { setBusyByPhone } = require('../utils/driverFlags');        // NEW
 
 // petit helper pour récupérer le token FCM du chauffeur
 async function getDriverFcmTokenByPhone(phone) {
@@ -503,6 +504,7 @@ router.get('/:id/discussion', async (req, res) => {
 
 
 // Cr�e une course automatiquement avec ETA chauffeur ? client et client ? destination
+// routes/rides.js
 router.post('/create_auto', async (req, res) => {
   const {
     client_name,
@@ -514,31 +516,38 @@ router.post('/create_auto', async (req, res) => {
   } = req.body;
 
   try {
-    const chauffeurRes = await db.query(
-      "SELECT phone, lat, lng FROM drivers WHERE available = true AND solde >= 3000 ORDER BY SQRT(POWER(lat - $1, 2) + POWER(lng - $2, 2)) ASC LIMIT 1",
-      [origin_lat, origin_lng]
-    );
+    // 1) trouver un chauffeur LIBRE (available=true, blocked=false, on_ride=false)
+    const chauffeurRes = await db.query(`
+      SELECT phone, lat, lng
+      FROM drivers
+      WHERE available = true
+        AND blocked = false
+        AND on_ride = false
+        AND solde >= 3000
+      ORDER BY ((lat - $1)*(lat - $1) + (lng - $2)*(lng - $2)) ASC
+      LIMIT 1
+    `, [origin_lat, origin_lng]);
 
     if (chauffeurRes.rows.length === 0) {
       return res.status(404).json({ error: 'Aucun chauffeur disponible' });
     }
-
     const chauffeur = chauffeurRes.rows[0];
-    const montantPropose = 3000;
-    const messageInitial = `client:${montantPropose}`;
 
+    // 2) ETA (Distance Matrix)
     const API_KEY = process.env.GOOGLE_MAPS_API_KEY;
     const distUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?units=metric&origins=${chauffeur.lat},${chauffeur.lng}&destinations=${origin_lat},${origin_lng}|${destination_lat},${destination_lng}&key=${API_KEY}`;
 
     const distResponse = await axios.get(distUrl);
-    const elements = distResponse.data.rows?.[0]?.elements;
-
+    const elements = distResponse.data?.rows?.[0]?.elements;
     if (!elements || elements.length < 2) {
       return res.status(500).json({ error: 'Réponse Distance Matrix invalide', data: distResponse.data });
     }
+    const etaToClient = elements[0]?.duration?.text ?? '-';
+    const etaToDestination = elements[1]?.duration?.text ?? '-';
 
-    const etaToClient = elements[0].duration.text;
-    const etaToDestination = elements[1].duration.text;
+    // 3) créer la course
+    const montantPropose = 3000;
+    const messageInitial = `client:${montantPropose}`;
 
     const insertRes = await db.query(`
       INSERT INTO rides (
@@ -547,8 +556,15 @@ router.post('/create_auto', async (req, res) => {
         destination_lat, destination_lng,
         driver_phone, proposed_price,
         discussion, client_accepted,
-        status, negotiation_status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ARRAY[$9], true, 'en_attente', 'en_attente')
+        status, negotiation_status,
+        contacted_driver_phones,     -- NEW: pour exclure lors des réassignations
+        reassign_attempts,           -- NEW
+        reassigning                  -- NEW
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8, ARRAY[$9], true,
+        'en_attente', 'en_attente',
+        ARRAY[$7], 0, FALSE
+      )
       RETURNING id
     `, [
       client_name, client_phone,
@@ -559,19 +575,24 @@ router.post('/create_auto', async (req, res) => {
       messageInitial
     ]);
 
-    res.status(201).json({
-      ride_id: insertRes.rows[0].id,
-      driver_phone: chauffeur.phone,
-      driver_lat: chauffeur.lat,
-      driver_lng: chauffeur.lng,
+    const rideId = insertRes.rows[0].id;
+
+    // 4) RÉSERVER le chauffeur (il ne pourra plus être repris ailleurs)
+    await setBusyByPhone(chauffeur.phone, true);   // => drivers.on_ride = true
+
+    // 5) réponse
+    return res.status(201).json({
+      ride_id: rideId,
+      driver: { phone: chauffeur.phone, lat: chauffeur.lat, lng: chauffeur.lng },
       eta_to_client: etaToClient,
       eta_to_destination: etaToDestination
     });
   } catch (err) {
     console.error("❌ Erreur create_auto :", err);
-    res.status(500).json({ error: 'Erreur serveur création course', details: err.message });
+    return res.status(500).json({ error: 'Erreur serveur création course', details: err.message });
   }
 });
+
 
 
 
@@ -1009,6 +1030,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
