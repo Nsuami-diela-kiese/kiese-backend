@@ -289,12 +289,14 @@ router.post('/:id/discussion', async (req, res) => {
   const body = req.body || {};
 
   try {
-    const from = (body.from || '').toString();   // 'client' | 'chauffeur'
-    const type = (body.type || '').toString();   // 'normal' | 'last_offer' | 'accept' | 'refuse'
+    const from = (body.from || '').toString();     // 'client' | 'chauffeur'
+    const type = (body.type || '').toString();     // 'normal'|'last_offer'|'accept'|'refuse'
     const amountRaw = (body.amount ?? '').toString();
     const amount = /^\d+$/.test(amountRaw) ? parseInt(amountRaw, 10) : null;
 
-    if (!from || !type) return res.status(400).json({ error: 'from et type sont requis' });
+    if (!from || !type) {
+      return res.status(400).json({ error: 'from et type sont requis' });
+    }
     if ((type === 'normal' || type === 'last_offer') && (amount == null || amount < 3000)) {
       return res.status(400).json({ error: 'Montant invalide (min 3000)' });
     }
@@ -306,7 +308,7 @@ router.post('/:id/discussion', async (req, res) => {
     const ride = r0.rows[0];
     if (!ride) return res.status(404).json({ error: 'RIDE_NOT_FOUND' });
 
-    // consigner le message de négo courant
+    // consigner message (sans "system:")
     let msg = `${from}:${amount != null ? amount : ''}`;
     if (type === 'last_offer') msg += ':last_offer';
     if (type === 'accept')     msg += ':accepted';
@@ -317,7 +319,7 @@ router.post('/:id/discussion', async (req, res) => {
       [msg, rideId]
     );
 
-    // MAJ proposed_price / last_offer_from
+    // proposed / last_offer
     if ((type === 'normal' || type === 'last_offer') && amount != null) {
       await db.query(`UPDATE rides SET proposed_price = $1 WHERE id = $2`, [amount, rideId]);
     }
@@ -328,7 +330,7 @@ router.post('/:id/discussion', async (req, res) => {
       );
     }
 
-    // accept/refuse
+    // accept
     if (type === 'accept') {
       if (from === 'client') {
         await db.query(`UPDATE rides SET client_accepted = TRUE WHERE id = $1`, [rideId]);
@@ -337,21 +339,20 @@ router.post('/:id/discussion', async (req, res) => {
       }
     }
 
+    // refuse
     if (type === 'refuse' && from === 'chauffeur') {
-      // poser immédiatement les champs d’annulation pour audit/analytics
-      await db.query(`
-        UPDATE rides
-           SET cancelled_by = 'chauffeur',
-               cancel_reason = 'driver_refused'
-         WHERE id = $1
-      `, [rideId]);
+      // renseigne qui/quoi (pas d'annulation de la course côté client)
+      await db.query(
+        `UPDATE rides SET cancelled_by = 'chauffeur', cancel_reason = 'driver_refused' WHERE id = $1`,
+        [rideId]
+      );
 
-      // lancer la réassignation robuste
+      // lance la réassignation (archive / reset / pick / notif)
       const rr = await reassignDriverForRide(rideId);
       console.log('[discussion] reassign result:', JSON.stringify(rr));
     }
 
-    // notif côté chauffeur si message client
+    // notif chauffeur si c'est le client qui écrit
     if (from === 'client') {
       try {
         const r1 = await db.query(`SELECT driver_phone FROM rides WHERE id = $1`, [rideId]);
@@ -384,7 +385,6 @@ router.post('/:id/discussion', async (req, res) => {
     return res.status(500).json({ error: 'SERVER_ERROR' });
   }
 });
-
 
 
 
@@ -877,22 +877,15 @@ router.post('/:id/negociation', async (req, res) => {
 });
 
 router.get('/:id/negociations', async (req, res) => {
-  const rideId = req.params.id;
-
   try {
-    const result = await db.query(
-      'SELECT discussion FROM rides WHERE id = $1',
-      [rideId]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Course introuvable' });
-    }
-
-    res.json(result.rows[0].discussion || []);
-  } catch (err) {
-    console.error("❌ Erreur récupération discussion :", err);
-    res.status(500).json({ error: 'Erreur serveur négociation' });
+    const rideId = Number(req.params.id);
+    const r = await db.query('SELECT discussion FROM rides WHERE id = $1', [rideId]);
+    const raw = r.rows[0]?.discussion || [];
+    const list = raw.filter(m => typeof m === 'string' && !m.startsWith('system:'));
+    return res.json({ list });
+  } catch (e) {
+    console.error('GET /:id/negociations error:', e);
+    return res.status(500).json({ error: 'SERVER_ERROR' });
   }
 });
 
@@ -928,6 +921,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
