@@ -21,7 +21,6 @@ async function selectNearestDriverHaversine({ originLat, originLng, excludePhone
            )) AS km
     FROM drivers d, params p
     WHERE d.available = TRUE
-      AND d.last_seen > now() - interval '60 seconds'
       AND d.lat IS NOT NULL AND d.lng IS NOT NULL
       AND NOT (d.phone = ANY($3::text[]))
     ORDER BY km ASC
