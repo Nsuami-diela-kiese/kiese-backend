@@ -600,118 +600,75 @@ router.post('/create_auto', async (req, res) => {
 // Body: { by: "driver" | "client" | "system" }
 // POST /api/ride/:id/cancel
 // Body: { by: "driver" | "client" | "system" }  (ou query ?by=client pour tester)
+// routes/rides.js
 router.post('/:id/cancel', async (req, res) => {
   const rideId = Number(req.params.id);
-  // 👇 lit by depuis body OU query, normalise, évite les blancs & majuscules
-  const by = ((req.body?.by ?? req.query?.by ?? '').toString().trim().toLowerCase());
+  const by = (req.body?.by || 'client'); // 'client' | 'chauffeur' | 'system'
+  const reason = req.body?.reason || null;
 
-  if (!rideId) return res.status(400).json({ error: 'INVALID_RIDE_ID' });
+  // chauffeur courant (à libérer si besoin)
+  const r = await db.query(`SELECT driver_phone FROM rides WHERE id=$1`, [rideId]);
+  const currentDriver = r.rows[0]?.driver_phone;
 
-  try {
-    const r0 = await db.query(
-      `SELECT driver_phone, reassign_on_cancel, contacted_driver_phones
-         FROM rides WHERE id = $1`,
-      [rideId]
-    );
-    const ride = r0.rows[0];
-    if (!ride) return res.status(404).json({ error: 'RIDE_NOT_FOUND' });
+  if (by === 'chauffeur') {
+    // 1) libère l'ancien chauffeur
+    await setBusyByPhone(currentDriver, false);
 
-    const prevDriver = ride.driver_phone || null;
+    // 2) flag "recherche en cours"
+    await db.query(`
+      UPDATE rides
+         SET reassigning = TRUE,
+             cancel_reason = $1,
+             cancelled_by = $2
+       WHERE id = $3
+    `, [reason || 'driver_cancel', 'chauffeur', rideId]);
 
-    // 🔒 Valider "by" pour éviter les réassignations involontaires
-    const allowed = new Set(['client','driver','system','admin']);
-    if (!allowed.has(by)) {
-      return res.status(400).json({ error: 'MISSING_OR_INVALID_BY', hint: "by must be 'client' | 'driver' | 'system' | 'admin'" });
+    // 3) tente la réassignation
+    const rr = await reassignDriverForRide(rideId);
+
+    // 4) fin de phase reassigning
+    await db.query(`UPDATE rides SET reassigning = FALSE WHERE id = $1`, [rideId]);
+
+    if (!rr.ok) {
+      // pas de chauffeur trouvé → on annule côté serveur
+      await db.query(`UPDATE rides SET status = 'annulee' WHERE id = $1`, [rideId]);
+      return res.status(409).json({ error: 'NO_DRIVER_AVAILABLE' });
     }
 
-    // 1) CLIENT annule → vraie annulation (pas de null sur driver_phone)
-    if (by === 'client') {
-      await db.query(
-        `UPDATE rides
-           SET status='annulee',
-               cancelled_by='client',
-               cancel_reason='client'
-         WHERE id=$1`,
-        [rideId]
-      );
+    // (optionnel) notifier le nouveau chauffeur ici via FCM
 
-      // (optionnel) notifier le chauffeur
-      if (prevDriver) {
-        try {
-          const tokPrev = await fcm.getDriverFcmTokenByPhone(prevDriver);
-          if (tokPrev) {
-            await fcm.sendFcm(
-              tokPrev,
-              { title: '❌ Course annulée', body: 'Le client a annulé la course.' },
-              { type: 'status_update', ride_id: String(rideId) }
-            );
-          }
-        } catch (e) { console.error('Notif client cancel -> driver:', e); }
-      }
-
-      return res.json({ ok: true, cancelled: true });
-    }
-
-    // 2) CHAUFFEUR annule OU auto-réassignation active → réassigner (pas annuler côté client)
-    if (by === 'driver' || ride.reassign_on_cancel) {
-      const updatedExclude = prevDriver
-        ? Array.from(new Set([...(ride.contacted_driver_phones || []), prevDriver]))
-        : (ride.contacted_driver_phones || []);
-
-      await db.query(
-        `UPDATE rides
-            SET status = 'en_attente',
-                driver_phone = NULL,
-                cancel_reason = $2,
-                cancelled_by = NULL,              -- 👈 pas une vraie annulation
-                contacted_driver_phones = $3
-          WHERE id = $1`,
-        [rideId, by === 'driver' ? 'driver_cancel' : 'auto_reassign', updatedExclude]
-      );
-
-      await db.query(`UPDATE rides SET reassigning = TRUE WHERE id = $1`, [rideId]);
-      let r;
-      try {
-        r = await reassignDriverForRide(rideId);
-      } finally {
-        await db.query(`UPDATE rides SET reassigning = FALSE WHERE id = $1`, [rideId]);
-      }
-
-      if (!r.ok) {
-        // pas de 404: la course reste visible chez le client
-        return res.json({ ok: true, reassign: false, reason: r.reason || 'NO_DRIVER_AVAILABLE' });
-      }
-
-      // notifier le nouveau chauffeur (optionnel)
-      try {
-        const tokNew = await fcm.getDriverFcmTokenByPhone(r.driver.phone);
-        if (tokNew) {
-          await fcm.sendFcm(
-            tokNew,
-            { title: '🚗 Nouvelle course', body: 'Une course vous a été assignée.' },
-            { type: 'new_ride', ride_id: String(rideId) }
-          );
-        }
-      } catch (e) { console.error('Notif new driver after cancel:', e); }
-
-      return res.json({ ok: true, reassign: true, driver: r.driver });
-    }
-
-    // 3) Autres cas (system/admin) → vraie annulation
-    await db.query(
-      `UPDATE rides
-         SET status='annulee',
-             cancelled_by=$2,
-             cancel_reason=$2
-       WHERE id=$1`,
-      [rideId, by]
-    );
-    return res.json({ ok: true, cancelled: true });
-  } catch (e) {
-    console.error('cancel error', e);
-    return res.status(500).json({ error: 'SERVER_ERROR' });
+    return res.json({ ok: true, driver: rr.driver });
   }
+
+  // --- Annulation côté client ---
+  await db.query(`
+    UPDATE rides
+       SET status = 'annulee',
+           cancel_reason = $1,
+           cancelled_by = $2
+     WHERE id = $3
+  `, [reason || 'client_cancel', 'client', rideId]);
+
+  // libère le chauffeur
+  await setBusyByPhone(currentDriver, false);
+
+  // (optionnel) notifier le chauffeur
+  try {
+    const token = await getDriverFcmTokenByPhone(currentDriver);
+    if (token) {
+      await sendFcm(
+        token,
+        { title: '❌ Course annulée', body: 'La course a été annulée par le client' },
+        { type: 'status_update', ride_id: String(rideId) }
+      );
+    }
+  } catch (e) {
+    console.error('Notif cancel:', e);
+  }
+
+  return res.json({ success: true });
 });
+
 
 
 
@@ -1030,6 +987,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
