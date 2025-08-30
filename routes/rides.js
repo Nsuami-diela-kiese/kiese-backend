@@ -4,12 +4,16 @@ const router = express.Router();
 const db = require('../db');
 const axios = require('axios');
 const { reassignDriverForRide } = require('../utils/reassign');
+const { pickNearestDriverAtomicFallback } = require('../utils/driverPicker');
 let setBusyByPhone = null;
 try {
   ({ setBusyByPhone } = require('../utils/driverFlags'));
 } catch (_) {
 }
 const { sendFcm } = require('../utils/fcm');
+let setOnRideByPhone, setBusyByPhone;
+try { ({ setOnRideByPhone, setBusyByPhone } = require('../utils/driverFlags')); } catch (_) {}
+
 
 async function getDriverFcmTokenByPhone(phone) {
   if (!phone) return null;
@@ -419,27 +423,39 @@ router.post('/create_auto', async (req, res) => {
   } = req.body;
 
   try {
-    // 🔎 choisit & RÉSERVE atomiquement
-    const driver = await pickNearestDriverAtomic({
+    // 🔎 sélection atomique + réservation
+    const driver = await pickNearestDriverAtomicFallback({
       originLat: origin_lat,
       originLng: origin_lng,
-      excludePhones: [],     // vierge à la création
-      radiusKm: 15
+      excludePhones: [],
+      radii: [3, 6, 10, 15],
+      minSolde: 3000,
     });
 
     if (!driver) {
       return res.status(404).json({ error: 'Aucun chauffeur disponible' });
     }
 
-    // ETA
+    // (double-sécu si tu veux uniformiser tes flags ailleurs)
+    try {
+      if (setOnRideByPhone) await setOnRideByPhone(driver.phone, true);
+      else if (setBusyByPhone) await setBusyByPhone(driver.phone, true);
+    } catch (_) {}
+
+    // ETA Google
     const API_KEY = process.env.GOOGLE_MAPS_API_KEY;
-    const distUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?units=metric&origins=${driver.lat},${driver.lng}&destinations=${origin_lat},${origin_lng}|${destination_lat},${destination_lng}&key=${API_KEY}`;
+    const distUrl =
+      `https://maps.googleapis.com/maps/api/distancematrix/json?units=metric` +
+      `&origins=${driver.lat},${driver.lng}` +
+      `&destinations=${origin_lat},${origin_lng}|${destination_lat},${destination_lng}` +
+      `&key=${API_KEY}`;
+
     const distResponse = await axios.get(distUrl);
-    const elements = distResponse.data?.rows?.[0]?.elements;
+    const elements = distResponse.data?.rows?.[0]?.elements || [];
     const etaToClient = elements?.[0]?.duration?.text ?? '-';
     const etaToDestination = elements?.[1]?.duration?.text ?? '-';
 
-    // INSERT ride
+    // 🚕 INSERT
     const montantPropose = 3000;
     const messageInitial = `client:${montantPropose}`;
 
@@ -453,37 +469,54 @@ router.post('/create_auto', async (req, res) => {
         status, negotiation_status,
         contacted_driver_phones, reassign_attempts, reassigning
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,
-        ARRAY[$9], true,
-        'en_attente', 'en_attente',
-        ARRAY[$7], 0, FALSE
+        $1,$2,$3,$4,$5,$6,
+        $7,$8,
+        ARRAY[$9]::text[], TRUE,
+        'en_attente','en_attente',
+        ARRAY[$7]::text[], 0, FALSE
       )
       RETURNING id
     `, [
       client_name, client_phone,
       origin_lat, origin_lng,
       destination_lat, destination_lng,
-      driver.phone,
-      montantPropose,
+      driver.phone, montantPropose,
       messageInitial
     ]);
 
     const rideId = ins.rows[0].id;
 
-    // (sécurité) déjà réservé par le picker, mais on garde ce helper si tu l’utilises ailleurs
-    await setBusyByPhone(driver.phone, true);
+    // 🔔 Notif chauffeur
+    try {
+      const token = await getDriverFcmTokenByPhone(driver.phone);
+      if (token) {
+        await sendFcm(
+          token,
+          { title: '🚗 Nouvelle course', body: `Course #${rideId} en attente` },
+          { type: 'new_ride', ride_id: String(rideId) }
+        );
+      }
+    } catch (e) { console.error('FCM create_auto:', e); }
 
     return res.status(201).json({
       ride_id: rideId,
       driver: { phone: driver.phone, lat: driver.lat, lng: driver.lng },
       eta_to_client: etaToClient,
-      eta_to_destination: etaToDestination
+      eta_to_destination: etaToDestination,
+      status: 'en_attente'
     });
   } catch (e) {
     console.error('create_auto error:', e);
     return res.status(500).json({ error: 'Erreur serveur création course' });
   }
 });
+
+/**
+ * POST /api/ride/create_negociation
+ * - version négociation (montant proposé par le client)
+ * - utilise aussi le picker atomique
+ * - seed contacted_driver_phones
+ */
 
 
 
@@ -679,96 +712,102 @@ if (!route) return res.status(400).json({ error: "Route manquante" });
 
 router.post('/create_negociation', async (req, res) => {
   const {
-    client_name,
-    client_phone,
-    origin_lat,
-    origin_lng,
-    destination_lat,
-    destination_lng,
+    client_name, client_phone,
+    origin_lat, origin_lng,
+    destination_lat, destination_lng,
     proposed_price
   } = req.body;
 
   try {
-    const chauffeurRes = await db.query(
-      "SELECT phone, name, lat, lng, plaque, couleur, photo, marque, modele FROM drivers WHERE available = true AND solde >= 3000 ORDER BY SQRT(POWER(lat - $1, 2) + POWER(lng - $2, 2)) ASC LIMIT 1",
-      [origin_lat, origin_lng]
-    );
+    const minSolde = Math.max(Number(proposed_price) || 0, 3000);
 
-    if (chauffeurRes.rows.length === 0) {
+    const driver = await pickNearestDriverAtomicFallback({
+      originLat: origin_lat,
+      originLng: origin_lng,
+      excludePhones: [],
+      radii: [3, 6, 10, 15],
+      minSolde
+    });
+
+    if (!driver) {
       return res.status(404).json({ error: 'Aucun chauffeur disponible' });
     }
 
-    const chauffeur = chauffeurRes.rows[0];
+    // (double-sécu flags)
+    try {
+      if (setOnRideByPhone) await setOnRideByPhone(driver.phone, true);
+      else if (setBusyByPhone) await setBusyByPhone(driver.phone, true);
+    } catch (_) {}
+
+    // ETA Google
+    const API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+    const distUrl =
+      `https://maps.googleapis.com/maps/api/distancematrix/json?units=metric` +
+      `&origins=${driver.lat},${driver.lng}` +
+      `&destinations=${origin_lat},${origin_lng}|${destination_lat},${destination_lng}` +
+      `&key=${API_KEY}`;
+
+    const distResponse = await axios.get(distUrl);
+    const elements = distResponse.data?.rows?.[0]?.elements || [];
+    const etaToClient = elements?.[0]?.duration?.text ?? '-';
+    const etaToDestination = elements?.[1]?.duration?.text ?? '-';
+
+    // 🚕 INSERT
     const messageInitial = `client:${proposed_price}`;
 
-    const API_KEY = process.env.GOOGLE_MAPS_API_KEY;
-    const distUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?units=metric&origins=${chauffeur.lat},${chauffeur.lng}&destinations=${origin_lat},${origin_lng}|${destination_lat},${destination_lng}&key=${API_KEY}`;
-    const distResponse = await axios.get(distUrl);
-    const elements = distResponse.data.rows?.[0]?.elements;
-
-    if (!elements || elements.length < 2) {
-      return res.status(500).json({ error: 'Réponse Distance Matrix invalide', data: distResponse.data });
-    }
-
-    const etaToClient = elements[0]?.duration?.text || 'inconnu';
-    const etaToDestination = elements[1]?.duration?.text || 'inconnu';
-
-    const insertRes = await db.query(
-      `INSERT INTO rides (
+    const ins = await db.query(`
+      INSERT INTO rides (
         client_name, client_phone,
         origin_lat, origin_lng,
         destination_lat, destination_lng,
         driver_phone, proposed_price,
         discussion, client_accepted,
-        status, negotiation_status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ARRAY[$9], true, 'en_attente', 'en_attente')
-      RETURNING id`,
-      [
-        client_name, client_phone,
-        origin_lat, origin_lng,
-        destination_lat, destination_lng,
-        chauffeur.phone, proposed_price,
-        messageInitial
-      ]
-    );
+        status, negotiation_status,
+        contacted_driver_phones, reassign_attempts, reassigning
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,
+        $7,$8,
+        ARRAY[$9]::text[], TRUE,
+        'en_attente','en_attente',
+        ARRAY[$7]::text[], 0, FALSE
+      )
+      RETURNING id
+    `, [
+      client_name, client_phone,
+      origin_lat, origin_lng,
+      destination_lat, destination_lng,
+      driver.phone, proposed_price,
+      messageInitial
+    ]);
 
+    const rideId = ins.rows[0].id;
+
+    // 🔔 Notif chauffeur
     try {
-  const rideId = insertRes.rows[0].id;
-  const token = await getDriverFcmTokenByPhone(chauffeur.phone);
-  if (token) {
-    await sendFcm(
-      token,
-      { title: '🚗 Nouvelle course', body: 'Un client attend votre réponse' },
-      { type: 'new_ride', ride_id: String(rideId) } // 👈 data que lit l’app chauffeur
-    );
-  }
-} catch (e) {
-  console.error('Notif new_ride (create_negociation):', e);
-}
+      const token = await getDriverFcmTokenByPhone(driver.phone);
+      if (token) {
+        await sendFcm(
+          token,
+          { title: '🚗 Nouvelle course', body: 'Un client attend votre réponse' },
+          { type: 'new_ride', ride_id: String(rideId) }
+        );
+      }
+    } catch (e) { console.error('FCM create_negociation:', e); }
 
-
-    res.status(201).json({
-      ride_id: insertRes.rows[0].id,
-      driver: {
-        phone: chauffeur.phone,
-        name: chauffeur.name,
-        lat: chauffeur.lat,
-        lng: chauffeur.lng,
-        plaque: chauffeur.plaque,
-        couleur: chauffeur.couleur,
-        photo: chauffeur.photo,
-        marque: chauffeur.marque,
-        modele: chauffeur.modele
-      },
+    return res.status(201).json({
+      ride_id: rideId,
+      driver: { phone: driver.phone, lat: driver.lat, lng: driver.lng },
       eta_to_client: etaToClient,
       eta_to_destination: etaToDestination,
       status: 'en_attente'
     });
-  } catch (err) {
-    console.error("❌ Erreur backend :", err);
-    res.status(500).json({ error: 'Erreur serveur création négociation', details: err.message });
+  } catch (e) {
+    console.error('create_negociation error:', e);
+    return res.status(500).json({ error: 'Erreur serveur création négociation' });
   }
 });
+
+
 
 router.get('/:id/driver_position', async (req, res) => {
   const rideId = req.params.id;
@@ -921,6 +960,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
