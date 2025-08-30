@@ -296,6 +296,7 @@ router.get('/:id/details', async (req, res) => {
 router.post('/:id/discussion', async (req, res) => {
   const rideId = Number(req.params.id);
   const body = req.body || {};
+  let detached = false;
 
   try {
     const from = (body.from || '').toString();     // 'client' | 'chauffeur'
@@ -357,6 +358,7 @@ router.post('/:id/discussion', async (req, res) => {
       );
 
       // lance la réassignation (archive / reset / pick / notif)
+      detached = true;
       const rr = await reassignDriverForRide(rideId);
       console.log('[discussion] reassign result:', JSON.stringify(rr));
     }
@@ -388,7 +390,7 @@ router.post('/:id/discussion', async (req, res) => {
       }
     }
 
-    return res.json({ success: true });
+    return res.json({ success: true, detached });
   } catch (e) {
     console.error('❌ /discussion error:', e);
     return res.status(500).json({ error: 'SERVER_ERROR' });
@@ -965,6 +967,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
