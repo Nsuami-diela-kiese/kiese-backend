@@ -354,70 +354,36 @@ router.post('/:id/discussion', async (req, res) => {
     }
 
     if (type === 'refuse') {
-      if (from === 'chauffeur') {
-        // ✅ REFUS CHAUFFEUR ⇒ on log, on ajoute l'ancien phone aux exclus,
-        // on met reassigning=TRUE, on libère l'ancien, puis on lance la réassignation
-        const oldPhone = ride.driver_phone || null;
+  if (from === 'chauffeur') {
+    const oldPhone = ride.driver_phone || null;
 
-        try {
-          await db.query('BEGIN');
+    // passe en recherche immédiatement côté client
+    await db.query(`
+      UPDATE rides
+         SET driver_phone = NULL,
+             status = 'en_attente',
+             cancelled_by = 'chauffeur',
+             cancel_reason = 'driver_refused',
+             reassigning = TRUE
+       WHERE id = $1
+    `, [rideId]);
 
-          // pousser l'ancien dans contacted_driver_phones (distinct)
-          if (oldPhone) {
-            await db.query(
-              `UPDATE rides
-                 SET contacted_driver_phones = (
-                       SELECT ARRAY(
-                         SELECT DISTINCT x
-                         FROM unnest(
-                           COALESCE(contacted_driver_phones, '{}'::text[]) || $2::text[]
-                         ) t(x)
-                       )
-                     )
-               WHERE id = $1`,
-              [rideId, [oldPhone]]
-            );
-          }
+    // libérer l’ancien (best-effort)
+    try { if (oldPhone && setBusyByPhone) await setBusyByPhone(oldPhone, false); } catch (_) {}
 
-          // marquer recherche + clear driver (le client verra "recherche...")
-          await db.query(
-            `UPDATE rides
-                SET driver_phone = NULL,
-                    status = 'en_attente',
-                    cancelled_by = 'chauffeur',
-                    cancel_reason = 'driver_refused',
-                    client_accepted = FALSE,
-                    reassigning = TRUE
-              WHERE id = $1`,
-            [rideId]
-          );
-
-          await db.query('COMMIT');
-        } catch (e) {
-          await db.query('ROLLBACK');
-          console.error('refuse tx error:', e);
-          return res.status(500).json({ error: 'REFUSE_TX_ERROR' });
-        }
-
-        // rendre l'ancien dispo (best-effort)
-        if (oldPhone) {
-          try { await setBusyByPhone(oldPhone, false); } catch (_) {}
-          try { await db.query(`UPDATE drivers SET available = TRUE WHERE phone = $1`, [oldPhone]); } catch (_) {}
-        }
-
-        // lancer la réassignation (hors transaction), puis couper le flag
-        try {
-          await reassignDriverForRide(rideId);
-        } catch (e) {
-          console.error('reassign error:', e);
-        } finally {
-          await db.query(`UPDATE rides SET reassigning = FALSE WHERE id=$1`, [rideId]);
-        }
-      } else if (from === 'client') {
-        // Refus client : on continue la négo (status en_attente)
-        await db.query(`UPDATE rides SET client_accepted=false WHERE id=$1`, [rideId]);
-      }
+    // lancer la réassignation (qui remettra discussion = ['client:<dernier>'])
+    try {
+      await reassignDriverForRide(rideId);
+    } finally {
+      // ce flag sera déjà remis à FALSE dans reassign, mais on sécurise
+      await db.query(`UPDATE rides SET reassigning = FALSE WHERE id=$1`, [rideId]);
     }
+  } else if (from === 'client') {
+    // refus client : on continue la négo (ne pas annuler la course)
+    await db.query(`UPDATE rides SET client_accepted = false WHERE id = $1`, [rideId]);
+  }
+}
+
 
     // -------- notifier chauffeur si le message vient du client --------
     if (from === 'client') {
@@ -1000,6 +966,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
