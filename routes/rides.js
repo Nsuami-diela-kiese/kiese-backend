@@ -241,57 +241,51 @@ router.post('/:id/start', async (req, res) => {
 });
 // ?? Donne les coordonn�es client + destination pour une course
 router.get('/:id/details', async (req, res) => {
-  const rideId = Number(req.params.id);
-
-  // 0) petite relance server-side si besoin (anti-spam via reassigning)
+  const id = Number(req.params.id);
   try {
-    const r0 = await db.query(`SELECT status, driver_phone, reassigning, reassign_attempts, max_reassign_attempts
-                               FROM rides WHERE id=$1`, [rideId]);
-    const cur = r0.rows[0];
-    const max = cur?.max_reassign_attempts ?? 5;
+    const r = await db.query(`
+      SELECT
+        r.id, r.status, r.reassigning, r.proposed_price,
+        r.origin_lat, r.origin_lng, r.destination_lat, r.destination_lng,
+        r.driver_phone,
+        jsonb_build_object(
+          'phone', d.phone,
+          'name', d.name,
+          'lat', d.lat,
+          'lng', d.lng,
+          'photo', d.photo,
+          'marque', d.marque,
+          'modele', d.modele,
+          'couleur', d.couleur,
+          'plaque', d.plaque
+        ) AS driver
+      FROM rides r
+      LEFT JOIN drivers d ON d.phone = r.driver_phone   -- ✨ pas de filtre sur d.available
+      WHERE r.id = $1
+    `, [id]);
 
-    if (cur && cur.status === 'en_attente' && !cur.driver_phone && cur.reassigning !== true
-        && (cur.reassign_attempts ?? 0) < max) {
-      await db.query(`UPDATE rides SET reassigning = TRUE WHERE id=$1`, [rideId]);
-      try { await reassignDriverForRide(rideId); }
-      finally { await db.query(`UPDATE rides SET reassigning = FALSE WHERE id=$1`, [rideId]); }
-    }
+    if (!r.rows[0]) return res.status(404).json({ error: 'RIDE_NOT_FOUND' });
+
+    const row = r.rows[0];
+    // tu peux aussi renvoyer driver_summary si tu en as besoin, mais garde driver intact
+    return res.json({
+      id: row.id,
+      status: row.status,
+      reassigning: row.reassigning,
+      proposed_price: row.proposed_price,
+      origin_lat: row.origin_lat,
+      origin_lng: row.origin_lng,
+      destination_lat: row.destination_lat,
+      destination_lng: row.destination_lng,
+      driver: row.driver,          // 👈 l’app lit ça
+      driver_summary: row.driver,  // compat si nécessaire
+    });
   } catch (e) {
-    console.error('auto-reassign hook error:', e);
+    console.error('details error:', e);
+    res.status(500).json({ error: 'SERVER_ERROR' });
   }
-
-  // 1) puis tu renvoies le détail comme avant
-  const r = await db.query(`
-    SELECT id, client_name, client_phone,
-           origin_lat, origin_lng,
-           destination_lat, destination_lng,
-           driver_phone, status, proposed_price, reassigning
-    FROM rides
-    WHERE id=$1
-  `, [rideId]);
-
-  const row = r.rows[0];
-  if (!row) return res.status(404).json({ error:'NOT_FOUND' });
-
-  let driver = null;
-  if (row.driver_phone) {
-    const d = await db.query(`SELECT phone, name, lat, lng, marque, modele, couleur, plaque
-                              FROM drivers WHERE phone=$1`, [row.driver_phone]);
-    driver = d.rows[0] || null;
-  }
-
-  res.json({
-    id: row.id,
-    origin_lat: row.origin_lat,
-    origin_lng: row.origin_lng,
-    destination_lat: row.destination_lat,
-    destination_lng: row.destination_lng,
-    status: row.status,
-    proposed_price: row.proposed_price,
-    reassigning: row.reassigning === true,
-    driver, // nul si en recherche
-  });
 });
+
 
 
 
@@ -1006,6 +1000,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
