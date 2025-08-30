@@ -289,19 +289,16 @@ router.post('/:id/discussion', async (req, res) => {
   const body = req.body || {};
 
   try {
-    const from = (body.from || '').toString();          // 'client' | 'chauffeur'
-    const type = (body.type || '').toString();          // 'normal'|'last_offer'|'accept'|'refuse'
+    const from = (body.from || '').toString();   // 'client' | 'chauffeur'
+    const type = (body.type || '').toString();   // 'normal' | 'last_offer' | 'accept' | 'refuse'
     const amountRaw = (body.amount ?? '').toString();
     const amount = /^\d+$/.test(amountRaw) ? parseInt(amountRaw, 10) : null;
 
-    if (!from || !type) {
-      return res.status(400).json({ error: 'from et type sont requis' });
-    }
+    if (!from || !type) return res.status(400).json({ error: 'from et type sont requis' });
     if ((type === 'normal' || type === 'last_offer') && (amount == null || amount < 3000)) {
       return res.status(400).json({ error: 'Montant invalide (min 3000)' });
     }
 
-    // charge la course
     const r0 = await db.query(`
       SELECT id, status, driver_phone, proposed_price, discussion
       FROM rides WHERE id = $1
@@ -309,7 +306,7 @@ router.post('/:id/discussion', async (req, res) => {
     const ride = r0.rows[0];
     if (!ride) return res.status(404).json({ error: 'RIDE_NOT_FOUND' });
 
-    // consigner le message (⚠️ CAST)
+    // consigner le message de négo courant
     let msg = `${from}:${amount != null ? amount : ''}`;
     if (type === 'last_offer') msg += ':last_offer';
     if (type === 'accept')     msg += ':accepted';
@@ -341,12 +338,20 @@ router.post('/:id/discussion', async (req, res) => {
     }
 
     if (type === 'refuse' && from === 'chauffeur') {
-      // 🔁 TRIGGER réassignation (gère tout: guard, archive, reset, pick, notif)
+      // poser immédiatement les champs d’annulation pour audit/analytics
+      await db.query(`
+        UPDATE rides
+           SET cancelled_by = 'chauffeur',
+               cancel_reason = 'driver_refused'
+         WHERE id = $1
+      `, [rideId]);
+
+      // lancer la réassignation robuste
       const rr = await reassignDriverForRide(rideId);
       console.log('[discussion] reassign result:', JSON.stringify(rr));
     }
 
-    // 🔔 notif (client → chauffeur)
+    // notif côté chauffeur si message client
     if (from === 'client') {
       try {
         const r1 = await db.query(`SELECT driver_phone FROM rides WHERE id = $1`, [rideId]);
@@ -923,6 +928,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
