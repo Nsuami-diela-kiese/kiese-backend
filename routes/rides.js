@@ -3,16 +3,21 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const axios = require('axios');
+
+const { sendFcm } = require('../utils/fcm');                 // ✅ une seule import FCM
 const { reassignDriverForRide } = require('../utils/reassign');
 const { pickNearestDriverAtomicFallback } = require('../utils/driverPicker');
-let setBusyByPhone = null;
+
+// ✅ Import "optionnel" des helpers de flags SANS redéclaration
+let setOnRideByPhone = async () => {};
+let setBusyByPhone   = async () => {};
 try {
-  ({ setBusyByPhone } = require('../utils/driverFlags'));
+  const flags = require('../utils/driverFlags');
+  if (typeof flags.setOnRideByPhone === 'function') setOnRideByPhone = flags.setOnRideByPhone;
+  if (typeof flags.setBusyByPhone   === 'function') setBusyByPhone   = flags.setBusyByPhone;
 } catch (_) {
+  // module absent : on garde des no-op
 }
-const { sendFcm } = require('../utils/fcm');
-let setOnRideByPhone, setBusyByPhone;
-try { ({ setOnRideByPhone, setBusyByPhone } = require('../utils/driverFlags')); } catch (_) {}
 
 
 async function getDriverFcmTokenByPhone(phone) {
@@ -960,6 +965,7 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
