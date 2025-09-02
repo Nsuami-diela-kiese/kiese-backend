@@ -5,8 +5,9 @@ const db = require('../db');
 const axios = require('axios');
 
 const { sendFcm } = require('../utils/fcm');                 // ✅ une seule import FCM
-const { reassignDriverForRide } = require('../utils/reassign');
+const { reassignDriverForRide, ensureReassignForRide } = require('../utils/reassign');
 const { pickNearestDriverAtomicFallback } = require('../utils/driverPicker');
+function toInt(x, def = 0) { const n = Number(x); return Number.isFinite(n) ? Math.trunc(n) : def; }
 
 // ✅ Import "optionnel" des helpers de flags SANS redéclaration
 let setOnRideByPhone = async () => {};
@@ -963,10 +964,54 @@ router.post('/:id/reassign_driver', async (req, res) => {
 
 
 
+async function ensureHandler(req, res) {
+  const rideId = Number(req.params.id || 0);
+  if (!rideId) return res.status(400).json({ ok:false, error:'INVALID_RIDE_ID' });
+
+  const { radius_m, radii_km, clear_blacklist = false } = req.body || {};
+  const opts = {
+    radiusM: toInt(radius_m, 0) || undefined,
+    radii: Array.isArray(radii_km) ? radii_km : undefined,
+    clearBlacklist: !!clear_blacklist,
+  };
+
+  const r = await ensureReassignForRide(rideId, opts).catch(e => ({ ok:false, reason:'ENSURE_EXCEPTION' }));
+  if (r.ok)         return res.json({ ok:true, searching:false, reason: r.reason || null, reassigned_to: r.driver?.phone || null });
+  if (r.searching)  return res.status(202).json({ ok:false, searching:true, reason: r.reason || 'SEARCH_ACTIVE' });
+  return res.status(200).json({ ok:false, searching:true, reason: r.reason || 'NO_DRIVER_AVAILABLE' });
+}
+router.post('/:id/ensure_reassign', ensureHandler);
+router.post('/ensure_reassign/:id', ensureHandler);
+
+
+router.post('/:id/reassign', async (req, res) => {
+  const rideId = Number(req.params.id || 0);
+  if (!rideId) return res.status(400).json({ ok:false, error:'INVALID_RIDE_ID' });
+
+  const { reactivate = true, radius_m, radii_km, force = false, clear_blacklist = false } = req.body || {};
+  if (reactivate === true) {
+    await db.query(`UPDATE rides SET reassigning = TRUE WHERE id = $1`, [rideId]).catch(()=>{});
+  }
+
+  const opts = {
+    radiusM: toInt(radius_m, 0) || undefined,
+    radii: Array.isArray(radii_km) ? radii_km : undefined,
+    clearBlacklist: !!clear_blacklist,
+    force: !!force
+  };
+
+  const r = await reassignDriverForRide(rideId, opts).catch(e => ({ ok:false, reason:'REASSIGN_EXCEPTION' }));
+  if (r.ok) return res.json({ ok:true, searching:false, reassigned_to: r.driver?.phone || null });
+
+  const reason = String(r.reason || 'NO_DRIVER_AVAILABLE').toUpperCase();
+  return res.status(reason === 'NO_DRIVER_AVAILABLE' ? 202 : 200).json({ ok:false, searching:true, reason });
+});
+
 
 
 
 module.exports = router;
+
 
 
 
