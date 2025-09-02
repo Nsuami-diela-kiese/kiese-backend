@@ -660,59 +660,106 @@ module.exports = router;
 
 
 router.post('/:id/finish', async (req, res) => {
-  const rideId = req.params.id;
+  const rideId = Number(req.params.id);
   const { route } = req.body;
-if (!route) return res.status(400).json({ error: "Route manquante" });
+
+  if (!route) return res.status(400).json({ error: "Route manquante" });
+
+  const client = await db.connect();
   try {
-    // Récupérer le montant confirmé
-    const priceRes = await db.query("SELECT confirmed_price, driver_phone FROM rides WHERE id = $1", [rideId]);
-    if (priceRes.rows.length === 0) {
+    await client.query('BEGIN');
+
+    // Verrouille la course pour éviter les doubles débits
+    const { rows } = await client.query(
+      `SELECT id, status, confirmed_price, driver_phone
+       FROM rides
+       WHERE id = $1
+       FOR UPDATE`,
+      [rideId]
+    );
+    if (rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: "Course introuvable" });
     }
 
-    const confirmedPrice = priceRes.rows[0].confirmed_price || 0;
-    const driverId = priceRes.rows[0].driver_phone;
+    const ride = rows[0];
+    const driverPhone = ride.driver_phone;
 
+    // Si déjà terminée, on s'assure tout de même de libérer le chauffeur (idempotence)
+    if (ride.status === 'terminee') {
+      if (driverPhone) {
+        await client.query(
+          `UPDATE drivers
+           SET on_ride = FALSE,
+               current_ride_id = NULL
+           WHERE phone = $1`,
+          [driverPhone]
+        );
+      }
+      await client.query('COMMIT');
+
+      // Notif hors transaction
+      try {
+        const token = await getDriverFcmTokenByPhone(driverPhone);
+        if (token) {
+          await sendFcm(
+            token,
+            { title: '✅ Course terminée', body: 'Merci pour votre conduite' },
+            { type: 'status_update', ride_id: String(rideId) }
+          );
+        }
+      } catch (e) { console.error('Notif finish (idempotent):', e); }
+
+      return res.json({ success: true, alreadyFinished: true });
+    }
+
+    const confirmedPrice = ride.confirmed_price || 0;
     const commission = Math.floor(confirmedPrice * 0.15);
-    const soldeNet = confirmedPrice - commission;
 
-    // Mettre à jour la course
-    await db.query(`
-      UPDATE rides
-      SET status = 'terminee',
-          finished_at = NOW(),
-          route = $1,
-          commission = $2
-      WHERE id = $3
-    `, [JSON.stringify(route), commission, rideId]);
-
-    // Déduire du solde du chauffeur
-    await db.query(`
-      UPDATE drivers
-      SET solde = solde - $1
-      WHERE phone = $2
-    `, [commission, driverId]);
-
-    try {
-  const rideIdNum = Number(rideId);
-  const r = await db.query('SELECT driver_phone FROM rides WHERE id=$1', [rideIdNum]);
-  const token = await getDriverFcmTokenByPhone(r.rows[0]?.driver_phone);
-  if (token) {
-    await sendFcm(
-      token,
-      { title: '✅ Course terminée', body: 'Merci pour votre conduite' },
-      { type: 'status_update', ride_id: String(rideIdNum) }
+    // Met à jour la course
+    await client.query(
+      `UPDATE rides
+       SET status = 'terminee',
+           finished_at = NOW(),
+           route = $1,
+           commission = $2
+       WHERE id = $3`,
+       [JSON.stringify(route), commission, rideId]
     );
-  }
-} catch (e) {
-  console.error('Notif finish:', e);
-}
 
+    // Déduit la commission et libère le chauffeur
+    if (driverPhone) {
+      await client.query(
+        `UPDATE drivers
+         SET solde = solde - $1,
+             on_ride = FALSE,
+             current_ride_id = NULL
+         WHERE phone = $2`,
+        [commission, driverPhone]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    // Notif hors transaction
+    try {
+      const token = await getDriverFcmTokenByPhone(driverPhone);
+      if (token) {
+        await sendFcm(
+          token,
+          { title: '✅ Course terminée', body: 'Merci pour votre conduite' },
+          { type: 'status_update', ride_id: String(rideId) }
+        );
+      }
+    } catch (e) { console.error('Notif finish:', e); }
 
     res.json({ success: true, commission });
   } catch (e) {
+    try { await client.query('ROLLBACK'); } catch(_) {}
     console.error("Erreur finish :", e);
     res.status(500).json({ error: "Erreur serveur" });
+  } finally {
+    client.release();
   }
 });
 
@@ -1011,6 +1058,7 @@ router.post('/:id/reassign', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
