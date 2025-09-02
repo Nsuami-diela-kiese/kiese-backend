@@ -732,7 +732,7 @@ router.post('/:id/finish', async (req, res) => {
       await client.query(
         `UPDATE drivers
          SET solde = solde - $1,
-             on_ride = FALSE,
+             on_ride = FALSE
          WHERE phone = $2`,
         [commission, driverPhone]
       );
@@ -1057,6 +1057,7 @@ router.post('/:id/reassign', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
