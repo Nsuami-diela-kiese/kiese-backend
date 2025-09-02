@@ -17,6 +17,8 @@ async function _pickOnce({ originLat, originLng, excludePhones = [], radiusKm, m
         AND d.blocked  = FALSE
         AND d.solde   >= $5
         AND (array_length($3::text[], 1) IS NULL OR d.phone <> ALL($3))
+      -- Si tu as une colonne last_seen, tu peux filtrer les frais (décommente) :
+      -- AND d.last_seen > NOW() - INTERVAL '45 seconds'
     ),
     candidate AS (
       SELECT phone
@@ -36,14 +38,24 @@ async function _pickOnce({ originLat, originLng, excludePhones = [], radiusKm, m
   return rows[0] || null;
 }
 
+// -> Peut prendre soit radiusM (mètres), soit radii (km).
+function _radiiFromOptions({ radiusM, radii }) {
+  if (Array.isArray(radii) && radii.length) return radii.map(x => Math.max(1, Math.ceil(Number(x))));
+  const baseKm = Math.max(2, Math.ceil((Number(radiusM) || 0) / 1000));
+  // progression douce, plafonnée à 15 km
+  return [baseKm, Math.min(baseKm * 2, 12), 15];
+}
+
 async function pickNearestDriverAtomicFallback({
   originLat,
   originLng,
   excludePhones = [],
-  radii = [3, 6, 10, 15],
+  radii,        // km (ex: [3,6,10,15])
+  radiusM,      // mètres (ex: 5000) -> radii auto
   minSolde = 3000,
 }) {
-  for (const r of radii) {
+  const radiiKm = _radiiFromOptions({ radiusM, radii });
+  for (const r of radiiKm) {
     const found = await _pickOnce({ originLat, originLng, excludePhones, radiusKm: r, minSolde });
     if (found) return found;
   }
