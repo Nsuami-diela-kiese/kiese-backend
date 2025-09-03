@@ -28,6 +28,12 @@ app.use('/api/agent', agentsRoutes);
 const appRoutes = require('./routes/app');     // ⬅️ importer
 app.use('/api/app', appRoutes);  
 
+const authRoutes = require('./routes/auth');
+app.use('/api/auth', authRoutes);
+
+const clientRoutes = require('./routes/clients');
+app.use('/api/client', clientRoutes);
+
 
 // ✅ PORT
 const PORT = process.env.PORT || 3000;
@@ -68,6 +74,7 @@ app.get('/api/test/ping_fcm/:phone', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ Serveur démarré sur le port ${PORT}`);
 });
+
 
 
 
