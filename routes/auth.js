@@ -3,6 +3,9 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const otp = require('../utils/otp'); // << importe le module OTP
+const { sendSms } = require('../utils/sms');
+const OTP_DEBUG = process.env.OTP_DEBUG === '1';
+const { OTP_TTL_MIN } = require('../utils/otp');
 
 // Demande d'OTP
 router.post('/otp/request', async (req, res) => {
