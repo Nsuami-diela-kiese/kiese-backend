@@ -1,27 +1,24 @@
 // utils/sms.js
 const twilio = require('twilio');
 
-const {
-  TWILIO_ACCOUNT_SID,
-  TWILIO_AUTH_TOKEN,
-  TWILIO_FROM,
-} = process.env;
+const SID   = process.env.TWILIO_SID;
+const TOKEN = process.env.TWILIO_TOKEN;
+const FROM  = process.env.TWILIO_PHONE; // e.g. +15005550006 (numéro Twilio E.164)
 
 let client = null;
-if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
-  client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+function tw() {
+  if (!client) client = twilio(SID, TOKEN);
+  return client;
 }
 
-async function sendSMS(toE164, message) {
-  if (!client) {
-    console.warn('Twilio non configuré — SMS simulé:', toE164, message);
-    return { sid: 'SIMULATED' };
-  }
-  return client.messages.create({
-    from: TWILIO_FROM,
-    to: toE164,
-    body: message,
-  });
+/**
+ * Envoie un SMS via Twilio
+ * @param {string} to   - numéro E.164 (+243…)
+ * @param {string} body - message
+ */
+async function sendSms(to, body) {
+  if (!SID || !TOKEN || !FROM) throw new Error('TWILIO_ENV_MISSING');
+  return tw().messages.create({ from: FROM, to, body });
 }
 
-module.exports = { sendSMS };
+module.exports = { sendSms };
