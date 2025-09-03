@@ -1,9 +1,9 @@
 // utils/otp.js
 const crypto = require('crypto');
 
-const OTP_LENGTH = parseInt(process.env.OTP_LENGTH || '6', 10);
+const OTP_LENGTH  = parseInt(process.env.OTP_LENGTH  || '6', 10);
 const OTP_TTL_MIN = parseInt(process.env.OTP_TTL_MIN || '5', 10);
-const OTP_SECRET = process.env.OTP_SECRET || 'change-me';
+const OTP_SECRET  = process.env.OTP_SECRET || 'change-me';
 
 function generateNumericCode(len = OTP_LENGTH) {
   let out = '';
@@ -12,21 +12,24 @@ function generateNumericCode(len = OTP_LENGTH) {
 }
 
 function hashCode(code) {
-  // Hash rapide (sha256) + secret.
   return crypto.createHash('sha256').update(`${code}:${OTP_SECRET}`).digest('hex');
 }
 
-function isE164(phone) {
-  return /^\+\d{8,15}$/.test(phone);
-}
+function isE164(phone) { return /^\+\d{8,15}$/.test(phone); }
 
 function expiryDateFromNow() {
-  const expires = new Date();
-  expires.setMinutes(expires.getMinutes() + OTP_TTL_MIN);
-  return expires;
+  const d = new Date();
+  d.setMinutes(d.getMinutes() + OTP_TTL_MIN);
+  return d;
 }
 
 module.exports = {
-  OTP_LENGTH, OTP_TTL_MIN,
-  generateNumericCode, hashCode, isE164, expiryDateFromNow
+  OTP_LENGTH,
+  OTP_TTL_MIN,
+  generateNumericCode,
+  // ✅ alias pour compat avec l’ancien nom
+  randCode6: generateNumericCode,
+  hashCode,
+  isE164,
+  expiryDateFromNow,
 };
