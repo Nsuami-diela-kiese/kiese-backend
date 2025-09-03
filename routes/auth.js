@@ -1,21 +1,19 @@
+// routes/auth.js
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { randCode6, hashCode, isE164, expiryDateFromNow } = require('../utils/otp');
-// const { sendSms } = require('../utils/sms'); // active si tu as un sender
 
 // Demande d'OTP
 router.post('/otp/request', async (req, res) => {
   try {
-    const phone = String(req.body.phone || '').trim();
-    const name  = (req.body.name ?? '').toString().trim(); // optionnel mais on tente de le stocker
+    const phone   = String(req.body.phone || '').trim();
+    const name    = (req.body.name ?? '').toString().trim();
     const purpose = 'register';
 
-    if (!isE164(phone)) {
-      return res.status(400).json({ error: 'PHONE_NOT_E164' });
-    }
+    if (!isE164(phone)) return res.status(400).json({ error: 'PHONE_NOT_E164' });
 
-    // 1) upsert client (évite l’erreur NOT NULL sur name)
+    // 1) upsert client
     await db.query(`
       INSERT INTO clients (phone, name, verified, created_at, updated_at)
       VALUES ($1, COALESCE(NULLIF($2,''), 'Inconnu'), FALSE, NOW(), NOW())
@@ -24,15 +22,15 @@ router.post('/otp/request', async (req, res) => {
             updated_at = NOW()
     `, [phone, name]);
 
-    // 2) génère & hash l’OTP
-    const code = randCode6();                 // alias de generateNumericCode()
+    // 2) OTP
+    const code = randCode6();             // 6 chiffres
     const codeHash = hashCode(code);
     const expiresAt = expiryDateFromNow();
 
-    // 3) upsert otp_codes
+    // 3) upsert otp_codes (1 ligne / phone+purpose)
     await db.query(`
-      INSERT INTO otp_codes (phone, code_hash, expires_at, attempts, created_at, purpose, used)
-      VALUES ($1, $2, $3, 0, NOW(), $4, FALSE)
+      INSERT INTO otp_codes (phone, purpose, code_hash, expires_at, attempts, created_at, used, used_at)
+      VALUES ($1, $2, $3, $4, 0, NOW(), FALSE, NULL)
       ON CONFLICT (phone, purpose) DO UPDATE
         SET code_hash = EXCLUDED.code_hash,
             expires_at = EXCLUDED.expires_at,
@@ -40,9 +38,9 @@ router.post('/otp/request', async (req, res) => {
             used = FALSE,
             used_at = NULL,
             created_at = NOW()
-    `, [phone, codeHash, expiresAt, purpose]);
+    `, [phone, purpose, codeHash, expiresAt]);
 
-    // TODO: envoi via SMS provider ici (Twilio ou autre)
+    // TODO: send SMS ici
     // await sendSms(phone, `Votre code Kiese: ${code}`);
 
     return res.json({ ok: true /*, demoCode: code*/ });
@@ -52,74 +50,65 @@ router.post('/otp/request', async (req, res) => {
   }
 });
 
-// Vérification d'OTP
+// Vérification d’OTP (transaction + verrou)
 router.post('/otp/verify', async (req, res) => {
+  const client = await db.connect();
   try {
-    const phone = String(req.body.phone || '').trim();
-    const code  = String(req.body.code  || '').trim();
+    const phone   = String(req.body.phone || '').trim();
+    const code    = String(req.body.code  || '').trim();
     const purpose = 'register';
 
     if (!isE164(phone) || !/^\d{4,8}$/.test(code)) {
       return res.status(400).json({ error: 'BAD_INPUT' });
     }
 
-    const { rows } = await db.query(
-      `SELECT code_hash, expires_at, used, attempts
+    await client.query('BEGIN');
+
+    // 1) lock la ligne (unique par phone+purpose)
+    const r0 = await client.query(
+      `SELECT id, code_hash, expires_at, used, attempts
          FROM otp_codes
         WHERE phone = $1 AND purpose = $2
-        ORDER BY created_at DESC
-        LIMIT 1`,
+        FOR UPDATE`,
       [phone, purpose]
     );
-    if (rows.length === 0) {
+    if (r0.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(400).json({ error: 'NO_OTP' });
     }
-    const row = rows[0];
+    const row = r0.rows[0];
 
-    // expiré ?
+    // 2) checks
     if (new Date(row.expires_at) < new Date()) {
+      await client.query('ROLLBACK');
       return res.status(400).json({ error: 'EXPIRED' });
     }
-    // déjà utilisé ?
     if (row.used === true) {
+      await client.query('ROLLBACK');
       return res.status(400).json({ error: 'ALREADY_USED' });
     }
 
-    // compare hash
-    const ok = hashCode(code) === row.code_hash;
+    // 3) compare hash
+    const ok = (hashCode(code) === row.code_hash);
     if (!ok) {
-      await db.query(
-        `UPDATE otp_codes
-            SET attempts = COALESCE(attempts,0) + 1
-          WHERE phone = $1 AND purpose = $2`,
-        [phone, purpose]
-      );
+      await client.query(`UPDATE otp_codes SET attempts = attempts + 1 WHERE id = $1`, [row.id]);
+      await client.query('COMMIT');
       return res.status(400).json({ error: 'INVALID_CODE' });
     }
 
-    // marque utilisé + vérifie le client
-    await db.query('BEGIN');
-    await db.query(
-      `UPDATE otp_codes
-          SET used = TRUE, used_at = NOW()
-        WHERE phone = $1 AND purpose = $2`,
-      [phone, purpose]
-    );
-    await db.query(
-      `UPDATE clients
-          SET verified = TRUE, verified_at = NOW(), updated_at = NOW()
-        WHERE phone = $1`,
-      [phone]
-    );
-    await db.query('COMMIT');
+    // 4) marque utilisé + vérifie le client
+    await client.query(`UPDATE otp_codes SET used = TRUE, used_at = NOW() WHERE id = $1`, [row.id]);
+    await client.query(`UPDATE clients SET verified = TRUE, verified_at = NOW(), updated_at = NOW() WHERE phone = $1`, [phone]);
 
+    await client.query('COMMIT');
     return res.json({ ok: true });
   } catch (e) {
-    try { await db.query('ROLLBACK'); } catch (_) {}
+    try { await client.query('ROLLBACK'); } catch (_) {}
     console.error('otp/verify error:', e);
     return res.status(500).json({ error: 'SERVER_ERROR' });
+  } finally {
+    client.release();
   }
 });
-
 
 module.exports = router;
