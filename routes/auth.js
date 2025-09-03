@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { randCode6, hashCode } = require('../utils/otp');
+const { randCode6, hashCode, isE164, expiryDateFromNow } = require('../utils/otp');
 // const { sendSms } = require('../utils/sms'); // active si tu as un sender
 
 // Demande d'OTP
