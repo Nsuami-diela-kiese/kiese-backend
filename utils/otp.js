@@ -1,29 +1,26 @@
-// utils/otp.js
-const crypto = require('crypto');
-
-const OTP_LENGTH  = parseInt(process.env.OTP_LENGTH  || '6', 10);
-const OTP_TTL_MIN = parseInt(process.env.OTP_TTL_MIN || '5', 10);
-const OTP_SECRET  = process.env.OTP_SECRET || 'change-me';
-
-function generateNumericCode(len = OTP_LENGTH) {
-  let out = '';
-  for (let i = 0; i < len; i++) out += Math.floor(Math.random() * 10);
-  return out;
-}
-function hashCode(code) {
-  return crypto.createHash('sha256').update(`${code}:${OTP_SECRET}`).digest('hex');
-}
-function isE164(phone) { return /^\+\d{8,15}$/.test(phone); }
-function expiryDateFromNow() {
-  const d = new Date(); d.setMinutes(d.getMinutes() + OTP_TTL_MIN); return d;
+// utils/testOtp.js
+function loadTestOtpMap() {
+  const raw = process.env.TEST_OTP_OVERRIDES || "";
+  const map = new Map();
+  raw.split(",")
+    .map(s => s.trim())
+    .filter(Boolean)
+    .forEach(item => {
+      const [phone, code] = item.split(":").map(x => x.trim());
+      if (phone && code && /^\+\d{6,}$/.test(phone) && /^\d{4,8}$/.test(code)) {
+        map.set(phone, code);
+      }
+    });
+  return map;
 }
 
-module.exports = {
-  OTP_LENGTH,
-  OTP_TTL_MIN,
-  generateNumericCode,
-  randCode6: generateNumericCode, // alias pour compat
-  hashCode,
-  isE164,
-  expiryDateFromNow,
-};
+const TEST_OTP_MAP = loadTestOtpMap();
+
+function hasTestOverride(phone) {
+  return TEST_OTP_MAP.has(phone);
+}
+function isTestOtp(phone, code) {
+  return TEST_OTP_MAP.get(phone) === code;
+}
+
+module.exports = { hasTestOverride, isTestOtp };
