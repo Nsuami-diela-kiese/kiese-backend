@@ -3,6 +3,13 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { randCode6, hashCode, isE164, expiryDateFromNow } = require('../utils/otp');
+if (!otp.isE164(phone)) {
+  return res.status(400).json({ error: 'PHONE_NOT_E164' });
+}
+const code = otp.randCode6();
+const codeHash = otp.hashCode(code);
+const expiresAt = otp.expiryDateFromNow();
+const ok = (otp.hashCode(code) === row.code_hash);
 
 // Demande d'OTP
 router.post('/otp/request', async (req, res) => {
