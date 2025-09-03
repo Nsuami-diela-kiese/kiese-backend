@@ -1141,14 +1141,6 @@ router.post('/:id/notify_driver_arrived', async (req, res) => {
       return res.status(502).json({ error: 'fcm_send_failed', detail: String(r?.error || 'unknown') });
     }
 
-    // (optionnel) log l’event d’arrivée
-    if (lat && lng) {
-      await db.query(
-        'INSERT INTO driver_events (ride_id, type, lat, lng, created_at) VALUES ($1,$2,$3,$4,NOW())',
-        [rideId, 'arrived', lat, lng]
-      );
-    }
-
     return res.status(200).json({ ok: true });
   } catch (e) {
     console.error('notify_driver_arrived error:', e);
@@ -1169,6 +1161,7 @@ router.post('/:id/notify_driver_arrived', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
