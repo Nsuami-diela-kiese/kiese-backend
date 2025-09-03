@@ -10,58 +10,60 @@ function randomCode(n = 6) {
   return String(Math.floor(s + Math.random() * (9*s)));
 }
 
-// POST /api/auth/otp/request
-// body: { phone: "+2438xxxxxxx", purpose?: "login" }
-// routes/auth.js
+
 router.post('/otp/request', async (req, res) => {
-  const phone   = String(req.body?.phone || '').trim();
-  const purpose = String(req.body?.purpose || 'login');
+  const phone   = String(req.body?.phone || '').trim();   // E.164, ex: +243...
+  const nameRaw = (req.body?.name ?? '').toString().trim();
+  const fcm     = (req.body?.fcm_token ?? null);
 
   if (!phone.startsWith('+') || phone.length < 8) {
-    return res.status(400).json({ ok:false, error: 'PHONE_INVALID' });
+    return res.status(400).json({ ok:false, error:'PHONE_INVALID' });
   }
+  const name = nameRaw || phone; // ✅ Jamais NULL
 
-  const code = randomCode(6);
+  const code    = randomCode(6);
+  const purpose = 'login';
+
   const client = await db.connect();
   try {
     await client.query('BEGIN');
 
-    // 1) S'assurer que le client existe (clé étrangère satisfaite)
+    // 1) upsert client (name non NULL)
     await client.query(`
-      INSERT INTO clients (phone)
-      VALUES ($1)
-      ON CONFLICT (phone) DO NOTHING
-    `, [phone]);
+      INSERT INTO clients (phone, name, fcm_token, updated_at)
+      VALUES ($1, $2, $3, now())
+      ON CONFLICT (phone) DO UPDATE
+      SET name      = COALESCE(NULLIF($2,''), clients.name),
+          fcm_token = COALESCE($3, clients.fcm_token),
+          updated_at = now()
+    `, [phone, name, fcm]);
 
-    // (Optionnel) anti-spam simple: 1 code / 60s
+    // (anti-spam 60s)
     const r = await client.query(`
       SELECT COUNT(*)::int AS c
       FROM otp_codes
-      WHERE phone = $1 AND created_at > now() - interval '60 seconds'
+      WHERE phone=$1 AND created_at > now() - interval '60 seconds'
     `, [phone]);
     if (r.rows[0].c >= 1) {
       await client.query('ROLLBACK');
       return res.status(429).json({ ok:false, error:'TOO_MANY_REQUESTS' });
     }
 
-    // 2) Invalider les anciens codes non utilisés
-    await client.query(
-      `UPDATE otp_codes
-         SET used = TRUE, used_at = now()
-       WHERE phone = $1 AND used = FALSE`,
-      [phone]
-    );
+    // invalider anciens codes non utilisés
+    await client.query(`
+      UPDATE otp_codes SET used=TRUE, used_at=now()
+      WHERE phone=$1 AND used=FALSE
+    `, [phone]);
 
-    // 3) Insérer le nouveau code (FK OK car clients(phone) existe)
-    await client.query(
-      `INSERT INTO otp_codes (phone, code, purpose, expires_at, used)
-       VALUES ($1, $2, $3, now() + interval '5 minutes', FALSE)`,
-      [phone, code, purpose]
-    );
+    // 2) insérer le nouveau OTP
+    await client.query(`
+      INSERT INTO otp_codes (phone, code, purpose, expires_at, used)
+      VALUES ($1, $2, $3, now() + interval '5 minutes', FALSE)
+    `, [phone, code, purpose]);
 
     await client.query('COMMIT');
 
-    // Envoi SMS (ou log)
+    // envoyer SMS ou log
     try {
       if (process.env.TWILIO_SID && process.env.TWILIO_TOKEN && process.env.TWILIO_PHONE) {
         await sendSms(phone, `Votre code Kiese: ${code} (5 minutes)`);
@@ -72,13 +74,14 @@ router.post('/otp/request', async (req, res) => {
 
     return res.json({ ok:true });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
+    try { await client.query('ROLLBACK'); } catch {}
     console.error('otp/request error:', e);
     return res.status(500).json({ ok:false, error:'SERVER_ERROR' });
   } finally {
     client.release();
   }
 });
+
 
 
 // POST /api/auth/otp/verify
