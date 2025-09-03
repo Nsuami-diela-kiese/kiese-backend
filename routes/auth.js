@@ -45,6 +45,27 @@ router.post('/otp/request', async (req, res) => {
             created_at = NOW()
     `, [phone, codeHash, expiresAt, purpose]);
 
+      // 4) Envoi SMS (prod)
+try {
+  await sendSms(
+    phone,
+    `Kiese: votre code est ${code}. Valide ${OTP_TTL_MIN} min.`
+  );
+} catch (e) {
+  console.error('sendSms error:', e);
+  // Tu peux décider de renvoyer 500 si l’envoi est critique:
+  // return res.status(500).json({ error: 'SMS_SEND_FAILED' });
+}
+
+// 5) Réponse
+return res.json({
+  ok: true,
+  ...(OTP_DEBUG ? { demoCode: code } : {}) // renvoyé seulement en debug
+});
+
+
+        
+    
     // TODO: envoyer le SMS ici si tu as un provider
     // await sendSms(phone, `Votre code Kiese: ${code}`);
 
