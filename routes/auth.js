@@ -2,83 +2,117 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { sendSms } = require('../utils/sms');   // à adapter à ton util
-const crypto = require('crypto');
+const { sendSms } = require('../utils/sms'); // Twilio wrapper éventuel
+// Si tu n'as pas de SMS pour l’instant, logguer le code suffira.
 
-// Helpers simples (tu peux aussi réutiliser ceux de utils/otp.js si déjà faits)
-const OTP_LEN = parseInt(process.env.OTP_LENGTH || '6', 10);
-const OTP_TTL_MIN = parseInt(process.env.OTP_TTL_MIN || '5', 10);
-
-const isE164 = (p) => /^\+[1-9]\d{6,14}$/.test(p);
-const genCode = (n=OTP_LEN) => Array.from({length:n},()=>Math.floor(Math.random()*10)).join('');
-const hash = (code) => crypto.createHmac('sha256', process.env.OTP_SECRET || 'change-me').update(code).digest('hex');
+function randomCode(n = 6) {
+  const s = Math.pow(10, n-1);
+  return String(Math.floor(s + Math.random() * (9*s)));
+}
 
 // POST /api/auth/otp/request
+// body: { phone: "+2438xxxxxxx", purpose?: "login" }
 router.post('/otp/request', async (req, res) => {
   try {
-    const phone = String(req.body?.phone || '').trim();
-    if (!isE164(phone)) return res.status(400).json({ error: 'PHONE_INVALID' });
+    const phone   = String(req.body?.phone || '').trim();
+    const purpose = String(req.body?.purpose || 'login');
 
-    const code = genCode();
-    const codeHash = hash(code);
-    const expiresAt = new Date(Date.now() + OTP_TTL_MIN * 60 * 1000);
-
-    await db.query(
-      `INSERT INTO otp_codes (phone, code_hash, expires_at, used)
-       VALUES ($1, $2, $3, FALSE)`,
-      [phone, codeHash, expiresAt]
-    );
-
-    // Envoi SMS (Twilio ou stub)
-    try {
-      await sendSms(phone, `Votre code Kiese: ${code} (expire dans ${OTP_TTL_MIN} min)`);
-    } catch (e) {
-      console.error('sendSms failed:', e);
-      // on continue quand même côté dev/staging
+    if (!phone.startsWith('+') || phone.length < 8) {
+      return res.status(400).json({ ok:false, error: 'PHONE_INVALID' });
     }
 
-    return res.json({ ok: true, ttl_min: OTP_TTL_MIN });
+    const code = randomCode(6);
+
+    // Invalider les anciens codes non utilisés
+    await db.query(
+      `UPDATE otp_codes
+         SET used = TRUE, used_at = now()
+       WHERE phone = $1 AND used = FALSE`,
+      [phone]
+    );
+
+    // Insérer un nouveau code valable 5 minutes
+    await db.query(
+      `INSERT INTO otp_codes (phone, code, purpose, expires_at, used)
+       VALUES ($1, $2, $3, now() + interval '5 minutes', FALSE)`,
+      [phone, code, purpose]
+    );
+
+    // Envoi SMS (ou log)
+    try {
+      if (process.env.TWILIO_SID && process.env.TWILIO_TOKEN && process.env.TWILIO_PHONE) {
+        await sendSms(phone, `Votre code Kiese: ${code} (5 minutes)`);
+      } else {
+        console.log('[DEV][OTP] code pour', phone, '=>', code);
+      }
+    } catch (e) {
+      console.error('sendSms error:', e);
+      // on continue malgré tout
+    }
+
+    return res.json({ ok:true });
   } catch (e) {
     console.error('otp/request error:', e);
-    return res.status(500).json({ error: 'SERVER_ERROR' });
+    return res.status(500).json({ ok:false, error:'SERVER_ERROR' });
   }
 });
 
 // POST /api/auth/otp/verify
+// body: { phone: "+2438...", code: "123456" }
 router.post('/otp/verify', async (req, res) => {
   try {
     const phone = String(req.body?.phone || '').trim();
     const code  = String(req.body?.code  || '').trim();
 
-    if (!isE164(phone) || !/^\d{4,8}$/.test(code)) {
-      return res.status(400).json({ error: 'INVALID_INPUT' });
+    if (!phone || !code) {
+      return res.status(400).json({ ok:false, error:'MISSING_FIELDS' });
     }
 
-    const codeHash = hash(code);
+    const r = await db.query(
+      `SELECT id
+         FROM otp_codes
+        WHERE phone = $1
+          AND code = $2
+          AND used = FALSE
+          AND expires_at > now()
+        ORDER BY id DESC
+        LIMIT 1`,
+      [phone, code]
+    );
 
-    // On prend le dernier OTP non utilisé
-    const r = await db.query(`
-      SELECT id, expires_at, used
-      FROM otp_codes
-      WHERE phone=$1 AND code_hash=$2
-      ORDER BY id DESC
-      LIMIT 1
-    `, [phone, codeHash]);
-
-    const row = r.rows[0];
-    if (!row) return res.status(400).json({ ok:false, error:'CODE_NOT_FOUND' });
-    if (row.used) return res.status(400).json({ ok:false, error:'CODE_ALREADY_USED' });
-    if (new Date(row.expires_at) < new Date()) {
-      return res.status(400).json({ ok:false, error:'CODE_EXPIRED' });
+    if (r.rows.length === 0) {
+      return res.status(400).json({ ok:false, error:'OTP_INVALID_OR_EXPIRED' });
     }
 
-    // Marquer utilisé
-    await db.query(`UPDATE otp_codes SET used=TRUE, used_at=NOW() WHERE id=$1`, [row.id]);
+    const otpId = r.rows[0].id;
+
+    // marquer utilisé
+    await db.query(
+      `UPDATE otp_codes SET used = TRUE, used_at = now() WHERE id = $1`,
+      [otpId]
+    );
+
+    // Upsert client minimal (phone = PK, name optionnel)
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS clients (
+        phone TEXT PRIMARY KEY,
+        name  TEXT,
+        fcm_token TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+
+    // l’enregistrement du nom se fera via un autre endpoint si besoin
+    await db.query(`
+      INSERT INTO clients (phone)
+      VALUES ($1)
+      ON CONFLICT (phone) DO NOTHING
+    `, [phone]);
 
     return res.json({ ok:true });
   } catch (e) {
     console.error('otp/verify error:', e);
-    return res.status(500).json({ error: 'SERVER_ERROR' });
+    return res.status(500).json({ ok:false, error:'SERVER_ERROR' });
   }
 });
 
