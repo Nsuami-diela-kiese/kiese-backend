@@ -1,87 +1,82 @@
+// routes/auth.js
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { sendSMS } = require('../utils/sms');
-const { generateNumericCode, hashCode, isE164, expiryDateFromNow, OTP_LENGTH } = require('../utils/otp');
+const { sendSms } = require('../utils/sms');   // à adapter à ton util
+const crypto = require('crypto');
 
-// POST /api/auth/otp/request  { phone: "+243..." }
+// Helpers simples (tu peux aussi réutiliser ceux de utils/otp.js si déjà faits)
+const OTP_LEN = parseInt(process.env.OTP_LENGTH || '6', 10);
+const OTP_TTL_MIN = parseInt(process.env.OTP_TTL_MIN || '5', 10);
+
+const isE164 = (p) => /^\+[1-9]\d{6,14}$/.test(p);
+const genCode = (n=OTP_LEN) => Array.from({length:n},()=>Math.floor(Math.random()*10)).join('');
+const hash = (code) => crypto.createHmac('sha256', process.env.OTP_SECRET || 'change-me').update(code).digest('hex');
+
+// POST /api/auth/otp/request
 router.post('/otp/request', async (req, res) => {
   try {
     const phone = String(req.body?.phone || '').trim();
-    if (!isE164(phone)) return res.status(400).json({ error: 'INVALID_PHONE_E164' });
+    if (!isE164(phone)) return res.status(400).json({ error: 'PHONE_INVALID' });
 
-    // code + hash
-    const code = generateNumericCode(OTP_LENGTH);
-    const codeHash = hashCode(code);
-    const expiresAt = expiryDateFromNow();
+    const code = genCode();
+    const codeHash = hash(code);
+    const expiresAt = new Date(Date.now() + OTP_TTL_MIN * 60 * 1000);
 
-    await db.query('BEGIN');
+    await db.query(
+      `INSERT INTO otp_codes (phone, code_hash, expires_at, used)
+       VALUES ($1, $2, $3, FALSE)`,
+      [phone, codeHash, expiresAt]
+    );
 
-    // Upsert client si pas encore présent (name vide pour l’instant)
-    await db.query(`
-      INSERT INTO clients(phone, name, is_verified)
-      VALUES ($1, '', FALSE)
-      ON CONFLICT (phone) DO NOTHING
-    `, [phone]);
+    // Envoi SMS (Twilio ou stub)
+    try {
+      await sendSms(phone, `Votre code Kiese: ${code} (expire dans ${OTP_TTL_MIN} min)`);
+    } catch (e) {
+      console.error('sendSms failed:', e);
+      // on continue quand même côté dev/staging
+    }
 
-    // Upsert otp_codes pour ce phone
-    await db.query(`
-      INSERT INTO otp_codes(phone, code_hash, expires_at, attempts)
-      VALUES ($1, $2, $3, 0)
-      ON CONFLICT (phone) DO UPDATE
-        SET code_hash = EXCLUDED.code_hash,
-            expires_at = EXCLUDED.expires_at,
-            attempts = 0
-    `, [phone, codeHash, expiresAt]);
-
-    await db.query('COMMIT');
-
-    // Envoi SMS (message localisable)
-    const msg = `Votre code Kiese est: ${code}. Il expire dans ${process.env.OTP_TTL_MIN || 5} min.`;
-    await sendSMS(phone, msg);
-
-    return res.json({ ok: true });
+    return res.json({ ok: true, ttl_min: OTP_TTL_MIN });
   } catch (e) {
-    try { await db.query('ROLLBACK'); } catch {}
     console.error('otp/request error:', e);
     return res.status(500).json({ error: 'SERVER_ERROR' });
   }
 });
 
-// POST /api/auth/otp/verify  { phone:"+243...", code:"123456" }
+// POST /api/auth/otp/verify
 router.post('/otp/verify', async (req, res) => {
   try {
     const phone = String(req.body?.phone || '').trim();
-    const code = String(req.body?.code || '').trim();
+    const code  = String(req.body?.code  || '').trim();
 
-    if (!isE164(phone)) return res.status(400).json({ error: 'INVALID_PHONE_E164' });
-    if (!/^\d+$/.test(code)) return res.status(400).json({ error: 'INVALID_CODE' });
-
-    const { rows } = await db.query(`SELECT code_hash, expires_at, attempts FROM otp_codes WHERE phone = $1`, [phone]);
-    if (rows.length === 0) return res.status(400).json({ error: 'OTP_NOT_FOUND' });
-
-    const row = rows[0];
-    const now = new Date();
-    if (new Date(row.expires_at) < now) {
-      return res.status(400).json({ error: 'OTP_EXPIRED' });
+    if (!isE164(phone) || !/^\d{4,8}$/.test(code)) {
+      return res.status(400).json({ error: 'INVALID_INPUT' });
     }
 
-    const hash = hashCode(code);
-    if (hash !== row.code_hash) {
-      // incrémenter attempts
-      await db.query(`UPDATE otp_codes SET attempts = attempts + 1 WHERE phone = $1`, [phone]);
-      return res.status(400).json({ error: 'OTP_INVALID' });
+    const codeHash = hash(code);
+
+    // On prend le dernier OTP non utilisé
+    const r = await db.query(`
+      SELECT id, expires_at, used
+      FROM otp_codes
+      WHERE phone=$1 AND code_hash=$2
+      ORDER BY id DESC
+      LIMIT 1
+    `, [phone, codeHash]);
+
+    const row = r.rows[0];
+    if (!row) return res.status(400).json({ ok:false, error:'CODE_NOT_FOUND' });
+    if (row.used) return res.status(400).json({ ok:false, error:'CODE_ALREADY_USED' });
+    if (new Date(row.expires_at) < new Date()) {
+      return res.status(400).json({ ok:false, error:'CODE_EXPIRED' });
     }
 
-    // OK => vérifier le client
-    await db.query('BEGIN');
-    await db.query(`UPDATE clients SET is_verified = TRUE WHERE phone = $1`, [phone]);
-    await db.query(`DELETE FROM otp_codes WHERE phone = $1`, [phone]); // invalidation
-    await db.query('COMMIT');
+    // Marquer utilisé
+    await db.query(`UPDATE otp_codes SET used=TRUE, used_at=NOW() WHERE id=$1`, [row.id]);
 
-    return res.json({ ok: true, verified: true });
+    return res.json({ ok:true });
   } catch (e) {
-    try { await db.query('ROLLBACK'); } catch {}
     console.error('otp/verify error:', e);
     return res.status(500).json({ error: 'SERVER_ERROR' });
   }
