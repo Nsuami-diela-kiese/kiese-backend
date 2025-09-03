@@ -8,6 +8,7 @@ const { sendFcm } = require('../utils/fcm');                 // ✅ une seule im
 const { reassignDriverForRide, ensureReassignForRide } = require('../utils/reassign');
 const { pickNearestDriverAtomicFallback } = require('../utils/driverPicker');
 function toInt(x, def = 0) { const n = Number(x); return Number.isFinite(n) ? Math.trunc(n) : def; }
+const admin = require('firebase-admin');
 
 // ✅ Import "optionnel" des helpers de flags SANS redéclaration
 let setOnRideByPhone = async () => {};
@@ -1056,7 +1057,119 @@ router.post('/:id/reassign', async (req, res) => {
 
 
 
+
+
+
+
+
+// routes/rides.js (exemple)
+const admin = require('firebase-admin');
+
+// Helper pour éviter les crashs si le token est invalide
+async function sendFcmToToken(token, payload) {
+  try {
+    const resp = await admin.messaging().send({
+      token,
+      // 👇 Bloc NOTIFICATION = bannières OS (utile si app en arrière-plan)
+      notification: {
+        title: payload.title || 'Kiese',
+        body:  payload.body  || 'Mise à jour',
+      },
+      // 👇 Bloc DATA = infos de routage in-app
+      data: {
+        type:        payload.type || 'driver_arrived',
+        ride_id:     String(payload.rideId || ''),
+        ride_status: String(payload.rideStatus || ''),
+        // tu peux ajouter d’autres champs si besoin
+      },
+      android: {
+        priority: 'high',
+        notification: {
+          // ne mets pas channelId si tu ne le crées pas côté app
+          sound: 'default',
+        },
+      },
+      apns: {
+        payload: {
+          aps: {
+            sound: 'default',
+            // si tu voulais du "data only" iOS en bg: content-available: 1
+          },
+        },
+      },
+    });
+    console.log('FCM sent:', resp);
+    return { ok: true, resp };
+  } catch (e) {
+    console.error('FCM error:', e);
+    return { ok: false, error: e };
+  }
+}
+
+router.post('/api/ride/:id/notify_driver_arrived', async (req, res) => {
+  const rideId = Number(req.params.id);
+  const { lat, lng } = req.body || {};
+  if (!rideId) return res.status(400).json({ error: 'invalid ride id' });
+
+  // 1) Récupère la course + client
+  const q = `
+    SELECT r.id, r.status, r.client_phone, c.fcm_token
+    FROM rides r
+    LEFT JOIN clients c ON c.phone = r.client_phone
+    WHERE r.id = $1
+    LIMIT 1
+  `;
+  try {
+    const { rows } = await req.db.query(q, [rideId]);
+    if (!rows.length) return res.status(404).json({ error: 'ride_not_found' });
+
+    const ride = rows[0];
+    if (!ride.fcm_token) return res.status(409).json({ error: 'client_missing_fcm_token' });
+
+    // 2) Envoie la notif
+    const { ok, error, resp } = await sendFcmToToken(ride.fcm_token, {
+      title: 'Votre chauffeur est arrivé 🚗',
+      body:  'Il vous attend au point de prise en charge.',
+      type:  'driver_arrived',
+      rideId,
+      rideStatus: ride.status || '',
+    });
+
+    if (!ok) {
+      // token invalid/expired → tu peux le nullifier si code "registration-token-not-registered"
+      // if (error?.errorInfo?.code === 'messaging/registration-token-not-registered') { ... }
+      return res.status(500).json({ error: 'fcm_send_failed', detail: String(error) });
+    }
+
+    // (optionnel) log position d’arrivée
+    if (lat && lng) {
+      await req.db.query(
+        'INSERT INTO driver_events (ride_id, type, lat, lng, created_at) VALUES ($1,$2,$3,$4,NOW())',
+        [rideId, 'arrived', lat, lng]
+      );
+    }
+
+    return res.status(200).json({ ok: true, messageId: resp });
+  } catch (e) {
+    console.error('notify_driver_arrived error:', e);
+    return res.status(500).json({ error: 'server_error', detail: String(e) });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
 module.exports = router;
+
 
 
 
