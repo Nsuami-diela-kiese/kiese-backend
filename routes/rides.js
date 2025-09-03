@@ -8,7 +8,7 @@ const { sendFcm } = require('../utils/fcm');                 // ✅ une seule im
 const { reassignDriverForRide, ensureReassignForRide } = require('../utils/reassign');
 const { pickNearestDriverAtomicFallback } = require('../utils/driverPicker');
 function toInt(x, def = 0) { const n = Number(x); return Number.isFinite(n) ? Math.trunc(n) : def; }
-const admin = require('firebase-admin');
+
 
 // ✅ Import "optionnel" des helpers de flags SANS redéclaration
 let setOnRideByPhone = async () => {};
@@ -1169,6 +1169,7 @@ router.post('/api/ride/:id/notify_driver_arrived', async (req, res) => {
 
 
 module.exports = router;
+
 
 
 
