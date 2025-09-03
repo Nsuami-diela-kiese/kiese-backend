@@ -2,12 +2,15 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const otp = require('../utils/otp'); // << importe le module OTP
+const otp = require('../utils/otp');
 const { sendSms } = require('../utils/sms');
-const OTP_DEBUG = process.env.OTP_DEBUG === '1';
 const { OTP_TTL_MIN } = require('../utils/otp');
+const OTP_DEBUG = process.env.OTP_DEBUG === '1';
 
-// Demande d'OTP
+// << NEW: overrides OTP figé
+const { hasTestOverride, isTestOtp } = require('../utils/testOtp');
+
+// -------------------- Demande d'OTP --------------------
 router.post('/otp/request', async (req, res) => {
   try {
     const phone = String(req.body.phone || '').trim();
@@ -18,7 +21,7 @@ router.post('/otp/request', async (req, res) => {
       return res.status(400).json({ error: 'PHONE_NOT_E164' });
     }
 
-    // upsert client
+    // upsert client (on garde verified=false tant que non vérifié)
     await db.query(`
       INSERT INTO clients (phone, name, verified, created_at, updated_at)
       VALUES ($1, COALESCE(NULLIF($2,''), 'Inconnu'), FALSE, NOW(), NOW())
@@ -27,12 +30,16 @@ router.post('/otp/request', async (req, res) => {
             updated_at = NOW()
     `, [phone, name]);
 
-    // génère + hash l’OTP
+    // ✅ OTP figé -> pas d'envoi SMS (retour immédiat)
+    if (hasTestOverride(phone)) {
+      return res.json({ ok: true, test_override: true });
+    }
+
+    // Génère + hash l’OTP (flux normal)
     const code = otp.randCode6();
     const codeHash = otp.hashCode(code);
     const expiresAt = otp.expiryDateFromNow();
 
-    // upsert otp_codes
     await db.query(`
       INSERT INTO otp_codes (phone, code_hash, expires_at, attempts, created_at, purpose, used)
       VALUES ($1, $2, $3, 0, NOW(), $4, FALSE)
@@ -45,38 +52,28 @@ router.post('/otp/request', async (req, res) => {
             created_at = NOW()
     `, [phone, codeHash, expiresAt, purpose]);
 
-      // 4) Envoi SMS (prod)
-try {
-  await sendSms(
-    phone,
-    `Kiese: votre code est ${code}. Valide ${OTP_TTL_MIN} min.`
-  );
-} catch (e) {
-  console.error('sendSms error:', e);
-  // Tu peux décider de renvoyer 500 si l’envoi est critique:
-  // return res.status(500).json({ error: 'SMS_SEND_FAILED' });
-}
+    // Envoi SMS (prod)
+    try {
+      await sendSms(
+        phone,
+        `Kiese: votre code est ${code}. Valide ${OTP_TTL_MIN} min.`
+      );
+    } catch (e) {
+      console.error('sendSms error:', e);
+      // Option: return res.status(500).json({ error: 'SMS_SEND_FAILED' });
+    }
 
-// 5) Réponse
-return res.json({
-  ok: true,
-  ...(OTP_DEBUG ? { demoCode: code } : {}) // renvoyé seulement en debug
-});
-
-
-        
-    
-    // TODO: envoyer le SMS ici si tu as un provider
-    // await sendSms(phone, `Votre code Kiese: ${code}`);
-
-    return res.json({ ok: true /*, demoCode: code*/ });
+    return res.json({
+      ok: true,
+      ...(OTP_DEBUG ? { demoCode: code } : {})
+    });
   } catch (e) {
     console.error('otp/request error:', e);
     return res.status(500).json({ error: 'SERVER_ERROR' });
   }
 });
 
-// Vérification d'OTP
+// -------------------- Vérification d'OTP --------------------
 router.post('/otp/verify', async (req, res) => {
   try {
     const phone = String(req.body.phone || '').trim();
@@ -87,6 +84,27 @@ router.post('/otp/verify', async (req, res) => {
       return res.status(400).json({ error: 'BAD_INPUT' });
     }
 
+    // ✅ OTP figé → succès immédiat + verified=TRUE
+    if (isTestOtp(phone, code)) {
+      try {
+        await db.query('BEGIN');
+        await db.query(
+          `UPDATE clients
+              SET verified = TRUE,
+                  verified_at = NOW(),
+                  updated_at = NOW()
+            WHERE phone = $1`,
+          [phone]
+        );
+        await db.query('COMMIT');
+      } catch (e) {
+        try { await db.query('ROLLBACK'); } catch (_) {}
+        throw e;
+      }
+      return res.json({ ok: true, verified: true, test_override: true });
+    }
+
+    // 🔁 Flux normal : on vérifie code_hash + TTL + used
     const { rows } = await db.query(
       `SELECT code_hash, expires_at, used, attempts
          FROM otp_codes
@@ -127,7 +145,7 @@ router.post('/otp/verify', async (req, res) => {
     );
     await db.query('COMMIT');
 
-    return res.json({ ok: true });
+    return res.json({ ok: true, verified: true });
   } catch (e) {
     try { await db.query('ROLLBACK'); } catch (_) {}
     console.error('otp/verify error:', e);
