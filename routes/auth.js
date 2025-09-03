@@ -12,31 +12,54 @@ function randomCode(n = 6) {
 
 // POST /api/auth/otp/request
 // body: { phone: "+2438xxxxxxx", purpose?: "login" }
+// routes/auth.js
 router.post('/otp/request', async (req, res) => {
-  try {
-    const phone   = String(req.body?.phone || '').trim();
-    const purpose = String(req.body?.purpose || 'login');
+  const phone   = String(req.body?.phone || '').trim();
+  const purpose = String(req.body?.purpose || 'login');
 
-    if (!phone.startsWith('+') || phone.length < 8) {
-      return res.status(400).json({ ok:false, error: 'PHONE_INVALID' });
+  if (!phone.startsWith('+') || phone.length < 8) {
+    return res.status(400).json({ ok:false, error: 'PHONE_INVALID' });
+  }
+
+  const code = randomCode(6);
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1) S'assurer que le client existe (clé étrangère satisfaite)
+    await client.query(`
+      INSERT INTO clients (phone)
+      VALUES ($1)
+      ON CONFLICT (phone) DO NOTHING
+    `, [phone]);
+
+    // (Optionnel) anti-spam simple: 1 code / 60s
+    const r = await client.query(`
+      SELECT COUNT(*)::int AS c
+      FROM otp_codes
+      WHERE phone = $1 AND created_at > now() - interval '60 seconds'
+    `, [phone]);
+    if (r.rows[0].c >= 1) {
+      await client.query('ROLLBACK');
+      return res.status(429).json({ ok:false, error:'TOO_MANY_REQUESTS' });
     }
 
-    const code = randomCode(6);
-
-    // Invalider les anciens codes non utilisés
-    await db.query(
+    // 2) Invalider les anciens codes non utilisés
+    await client.query(
       `UPDATE otp_codes
          SET used = TRUE, used_at = now()
        WHERE phone = $1 AND used = FALSE`,
       [phone]
     );
 
-    // Insérer un nouveau code valable 5 minutes
-    await db.query(
+    // 3) Insérer le nouveau code (FK OK car clients(phone) existe)
+    await client.query(
       `INSERT INTO otp_codes (phone, code, purpose, expires_at, used)
        VALUES ($1, $2, $3, now() + interval '5 minutes', FALSE)`,
       [phone, code, purpose]
     );
+
+    await client.query('COMMIT');
 
     // Envoi SMS (ou log)
     try {
@@ -45,17 +68,18 @@ router.post('/otp/request', async (req, res) => {
       } else {
         console.log('[DEV][OTP] code pour', phone, '=>', code);
       }
-    } catch (e) {
-      console.error('sendSms error:', e);
-      // on continue malgré tout
-    }
+    } catch (e) { console.error('sendSms error:', e); }
 
     return res.json({ ok:true });
   } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
     console.error('otp/request error:', e);
     return res.status(500).json({ ok:false, error:'SERVER_ERROR' });
+  } finally {
+    client.release();
   }
 });
+
 
 // POST /api/auth/otp/verify
 // body: { phone: "+2438...", code: "123456" }
