@@ -20,7 +20,7 @@ router.post('/register', async (req, res) => {
         SET name = EXCLUDED.name,
             fcm_token = COALESCE(EXCLUDED.fcm_token, clients.fcm_token),
             updated_at = NOW()
-      RETURNING phone, name, fcm_token, is_verified
+      RETURNING phone, name, fcm_token, verified
     `, [phone, name, fcmToken]);
 
     return res.json({ ok: true, client: r.rows[0] });
@@ -55,7 +55,7 @@ router.get('/:phone', async (req, res) => {
     if (!isE164(phone)) return res.status(400).json({ error: 'INVALID_PHONE_E164' });
 
     const { rows } = await db.query(
-      `SELECT phone, name, fcm_token, is_verified, created_at, updated_at FROM clients WHERE phone = $1`,
+      `SELECT phone, name, fcm_token, verified, created_at, updated_at FROM clients WHERE phone = $1`,
       [phone]
     );
     if (rows.length === 0) return res.status(404).json({ error: 'CLIENT_NOT_FOUND' });
